@@ -1,0 +1,6 @@
+@Volts.Api_HostAddress = http://localhost:5062
+
+GET {{Volts.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
