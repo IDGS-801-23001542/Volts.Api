@@ -1,7 +1,6 @@
 ﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Volts.Api.DTOs;
-using Volts.Api.Responses;
 using Volts.Api.Services;
 
 namespace Volts.Api.Controllers;
@@ -22,6 +21,18 @@ public class AuthController : ControllerBase
     public async Task<IActionResult> Login(LoginRequestDto dto)
     {
         var result = await _authService.LoginAsync(dto);
+
+        if (!result.Success)
+            return BadRequest(result);
+
+        return Ok(result);
+    }
+
+    [HttpPost("register-client")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RegisterClient(RegisterClientDto dto)
+    {
+        var result = await _authService.RegisterClientAsync(dto);
 
         if (!result.Success)
             return BadRequest(result);

@@ -96,4 +96,89 @@ public class AuthService
 
         return ApiResponse<User>.Ok(user, "Usuario creado correctamente");
     }
+
+    public async Task<ApiResponse<LoginResponseDto>> RegisterClientAsync(
+    RegisterClientDto dto)
+    {
+        dto.FullName = dto.FullName.Trim();
+        dto.Email = dto.Email.Trim().ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(dto.FullName))
+            return ApiResponse<LoginResponseDto>.Fail(
+                "El nombre completo es obligatorio");
+
+        if (string.IsNullOrWhiteSpace(dto.Email))
+            return ApiResponse<LoginResponseDto>.Fail(
+                "El correo electrónico es obligatorio");
+
+        if (dto.Password.Length < 8)
+            return ApiResponse<LoginResponseDto>.Fail(
+                "La contraseña debe tener al menos 8 caracteres");
+
+        if (dto.Password != dto.ConfirmPassword)
+            return ApiResponse<LoginResponseDto>.Fail(
+                "Las contraseñas no coinciden");
+
+        var userExists = await _db.Users
+            .Find(x => x.Email == dto.Email && !x.IsDeleted)
+            .AnyAsync();
+
+        if (userExists)
+            return ApiResponse<LoginResponseDto>.Fail(
+                "Ya existe una cuenta con ese correo");
+
+        var clientRole = await _db.Roles
+            .Find(x =>
+                x.Name == "Client" &&
+                x.IsActive &&
+                !x.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        if (clientRole == null)
+            return ApiResponse<LoginResponseDto>.Fail(
+                "El rol de cliente no está configurado");
+
+        var user = new User
+        {
+            FullName = dto.FullName,
+            Email = dto.Email,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password),
+            RoleId = clientRole.Id,
+            RoleName = clientRole.Name,
+            IsActive = true,
+            TwoFactorEnabled = false,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        await _db.Users.InsertOneAsync(user);
+
+        var customer = new Customer
+        {
+            CustomerType = "Individual",
+            FullName = dto.FullName,
+            Email = dto.Email,
+            Phone = dto.Phone,
+            IsActive = true,
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = user.Id
+        };
+
+        await _db.Customers.InsertOneAsync(customer);
+
+        var token = _jwtService.GenerateToken(user);
+
+        var loginResponse = new LoginResponseDto
+        {
+            Token = token,
+            UserId = user.Id,
+            FullName = user.FullName,
+            Email = user.Email,
+            RoleName = user.RoleName
+        };
+
+        return ApiResponse<LoginResponseDto>.Ok(
+            loginResponse,
+            "Cuenta creada correctamente");
+    }
+
 }
