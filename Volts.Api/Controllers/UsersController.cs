@@ -89,9 +89,34 @@ public class UsersController : ControllerBase
         if (role == null)
             return BadRequest(ApiResponse<User>.Fail("Rol inválido"));
 
-        user.FullName = dto.FullName;
+        var hasStructuredName =
+    !string.IsNullOrWhiteSpace(dto.FirstNames) &&
+    !string.IsNullOrWhiteSpace(dto.PaternalLastName);
+
+        if (hasStructuredName)
+        {
+            user.Name.FirstNames = dto.FirstNames.Trim();
+            user.Name.PaternalLastName =
+                dto.PaternalLastName.Trim();
+
+            user.Name.MaternalLastName =
+                string.IsNullOrWhiteSpace(dto.MaternalLastName)
+                    ? null
+                    : dto.MaternalLastName.Trim();
+
+            user.LegacyFullName = null;
+        }
+        else if (!string.IsNullOrWhiteSpace(dto.FullName))
+        {
+            /*
+             * Compatibilidad temporal con el formulario anterior.
+             */
+            user.LegacyFullName = dto.FullName.Trim();
+        }
+
         user.RoleId = role.Id;
         user.RoleName = role.Name;
+        user.UserType = ResolveUserType(role.Name);
         user.IsActive = dto.IsActive;
         user.UpdatedAt = DateTime.UtcNow;
 
@@ -138,6 +163,33 @@ public class UsersController : ControllerBase
         if (!validPassword)
             return BadRequest(ApiResponse<string>.Fail("La contraseña actual es incorrecta"));
 
+        if (string.IsNullOrWhiteSpace(dto.NewPassword) || dto.NewPassword.Length < 8)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "La nueva contraseña debe tener al menos 8 caracteres"
+                )
+            );
+        }
+
+        if (dto.NewPassword != dto.ConfirmNewPassword)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "La confirmación de la nueva contraseña no coincide"
+                )
+            );
+        }
+
+        if (dto.CurrentPassword == dto.NewPassword)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "La nueva contraseña debe ser diferente a la actual"
+                )
+            );
+        }
+
         user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.NewPassword);
         user.UpdatedAt = DateTime.UtcNow;
 
@@ -166,5 +218,23 @@ public class UsersController : ControllerBase
             return NotFound(ApiResponse<string>.Fail("Usuario no encontrado"));
 
         return Ok(ApiResponse<string>.Ok("Usuario eliminado correctamente"));
+    }
+    private static Volts.Api.Models.Enums.UserType
+    ResolveUserType(string roleName)
+    {
+        return roleName switch
+        {
+            "Admin" =>
+                Volts.Api.Models.Enums.UserType.Employee,
+
+            "Employee" =>
+                Volts.Api.Models.Enums.UserType.Employee,
+
+            "Institution" =>
+                Volts.Api.Models.Enums.UserType.Institution,
+
+            _ =>
+                Volts.Api.Models.Enums.UserType.Customer
+        };
     }
 }
