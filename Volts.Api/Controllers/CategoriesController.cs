@@ -14,25 +14,27 @@ public class CategoriesController : ControllerBase
 {
     private readonly MongoDbService _db;
 
-    public CategoriesController(MongoDbService db)
+    public CategoriesController(
+        MongoDbService db)
     {
         _db = db;
     }
 
     // =========================================================
     // GET: api/Categories
-    // Sitio público: devuelve únicamente categorías activas.
+    // Público: solamente activas.
     // =========================================================
     [HttpGet]
     [AllowAnonymous]
     public async Task<IActionResult> GetPublic()
     {
-        var categories = await _db.Categories
-            .Find(category =>
-                !category.IsDeleted &&
-                category.IsActive)
-            .SortBy(category => category.Name)
-            .ToListAsync();
+        var categories =
+            await _db.Categories
+                .Find(item =>
+                    !item.IsDeleted &&
+                    item.IsActive)
+                .SortBy(item => item.Name)
+                .ToListAsync();
 
         return Ok(
             ApiResponse<List<Category>>.Ok(
@@ -44,16 +46,17 @@ public class CategoriesController : ControllerBase
 
     // =========================================================
     // GET: api/Categories/backoffice
-    // Admin y Employee pueden consultar activas e inactivas.
     // =========================================================
     [HttpGet("backoffice")]
     [Authorize(Roles = "Admin,Employee")]
     public async Task<IActionResult> GetBackoffice()
     {
-        var categories = await _db.Categories
-            .Find(category => !category.IsDeleted)
-            .SortBy(category => category.Name)
-            .ToListAsync();
+        var categories =
+            await _db.Categories
+                .Find(item =>
+                    !item.IsDeleted)
+                .SortBy(item => item.Name)
+                .ToListAsync();
 
         return Ok(
             ApiResponse<List<Category>>.Ok(
@@ -68,7 +71,8 @@ public class CategoriesController : ControllerBase
     // =========================================================
     [HttpGet("{id}")]
     [Authorize(Roles = "Admin,Employee")]
-    public async Task<IActionResult> GetById(string id)
+    public async Task<IActionResult> GetById(
+        string id)
     {
         if (string.IsNullOrWhiteSpace(id))
         {
@@ -79,11 +83,12 @@ public class CategoriesController : ControllerBase
             );
         }
 
-        var category = await _db.Categories
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+        var category =
+            await _db.Categories
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
 
         if (category == null)
         {
@@ -111,29 +116,33 @@ public class CategoriesController : ControllerBase
     public async Task<IActionResult> Create(
         [FromBody] CategoryCreateDto dto)
     {
-        var validationError = ValidateCategory(
-            dto.Name,
-            dto.Description
-        );
+        var validationError =
+            ValidateCategory(
+                dto.Name,
+                dto.Description
+            );
 
         if (validationError != null)
         {
             return BadRequest(
-                ApiResponse<Category>.Fail(validationError)
+                ApiResponse<Category>.Fail(
+                    validationError
+                )
             );
         }
 
-        var normalizedName = dto.Name.Trim();
-        var normalizedDescription = dto.Description.Trim();
+        var normalizedName =
+            dto.Name.Trim();
 
-        var exists = await _db.Categories
-            .Find(category =>
-                category.Name.ToLower() ==
-                normalizedName.ToLower() &&
-                !category.IsDeleted)
-            .AnyAsync();
+        var duplicate =
+            await _db.Categories
+                .Find(item =>
+                    item.Name.ToLower() ==
+                        normalizedName.ToLower() &&
+                    !item.IsDeleted)
+                .AnyAsync();
 
-        if (exists)
+        if (duplicate)
         {
             return BadRequest(
                 ApiResponse<Category>.Fail(
@@ -144,18 +153,32 @@ public class CategoriesController : ControllerBase
 
         var category = new Category
         {
-            Name = normalizedName,
-            Description = normalizedDescription,
-            IsActive = true,
-            IsDeleted = false,
-            CreatedAt = DateTime.UtcNow
+            Name =
+                normalizedName,
+
+            Description =
+                dto.Description?.Trim() ??
+                string.Empty,
+
+            IsActive =
+                true,
+
+            IsDeleted =
+                false,
+
+            CreatedAt =
+                DateTime.UtcNow
         };
 
-        await _db.Categories.InsertOneAsync(category);
+        await _db.Categories
+            .InsertOneAsync(category);
 
         return CreatedAtAction(
             nameof(GetById),
-            new { id = category.Id },
+            new
+            {
+                id = category.Id
+            },
             ApiResponse<Category>.Ok(
                 category,
                 "Categoría creada correctamente"
@@ -173,32 +196,27 @@ public class CategoriesController : ControllerBase
         string id,
         [FromBody] CategoryUpdateDto dto)
     {
-        if (string.IsNullOrWhiteSpace(id))
-        {
-            return BadRequest(
-                ApiResponse<Category>.Fail(
-                    "El identificador de la categoría es obligatorio"
-                )
+        var validationError =
+            ValidateCategory(
+                dto.Name,
+                dto.Description
             );
-        }
-
-        var validationError = ValidateCategory(
-            dto.Name,
-            dto.Description
-        );
 
         if (validationError != null)
         {
             return BadRequest(
-                ApiResponse<Category>.Fail(validationError)
+                ApiResponse<Category>.Fail(
+                    validationError
+                )
             );
         }
 
-        var category = await _db.Categories
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+        var category =
+            await _db.Categories
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
 
         if (category == null)
         {
@@ -209,18 +227,39 @@ public class CategoriesController : ControllerBase
             );
         }
 
-        var normalizedName = dto.Name.Trim();
-        var normalizedDescription = dto.Description.Trim();
+        if (!dto.IsActive)
+        {
+            var hasActiveProducts =
+                await _db.Products
+                    .Find(product =>
+                        product.CategoryId == id &&
+                        !product.IsDeleted &&
+                        product.IsActive)
+                    .AnyAsync();
 
-        var duplicateExists = await _db.Categories
-            .Find(item =>
-                item.Id != id &&
-                item.Name.ToLower() ==
-                normalizedName.ToLower() &&
-                !item.IsDeleted)
-            .AnyAsync();
+            if (hasActiveProducts)
+            {
+                return BadRequest(
+                    ApiResponse<Category>.Fail(
+                        "No se puede desactivar la categoría porque tiene productos activos"
+                    )
+                );
+            }
+        }
 
-        if (duplicateExists)
+        var normalizedName =
+            dto.Name.Trim();
+
+        var duplicate =
+            await _db.Categories
+                .Find(item =>
+                    item.Id != id &&
+                    item.Name.ToLower() ==
+                        normalizedName.ToLower() &&
+                    !item.IsDeleted)
+                .AnyAsync();
+
+        if (duplicate)
         {
             return BadRequest(
                 ApiResponse<Category>.Fail(
@@ -229,25 +268,93 @@ public class CategoriesController : ControllerBase
             );
         }
 
-        category.Name = normalizedName;
-        category.Description = normalizedDescription;
-        category.IsActive = dto.IsActive;
-        category.UpdatedAt = DateTime.UtcNow;
+        var previousName =
+            category.Name;
 
-        var result = await _db.Categories.ReplaceOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            category
-        );
+        category.Name =
+            normalizedName;
 
-        if (result.MatchedCount == 0)
+        category.Description =
+            dto.Description?.Trim() ??
+            string.Empty;
+
+        category.IsActive =
+            dto.IsActive;
+
+        category.UpdatedAt =
+            DateTime.UtcNow;
+
+        using var session =
+            await _db.StartSessionAsync();
+
+        try
         {
-            return NotFound(
-                ApiResponse<Category>.Fail(
-                    "Categoría no encontrada"
-                )
-            );
+            session.StartTransaction();
+
+            var categoryResult =
+                await _db.Categories
+                    .ReplaceOneAsync(
+                        session,
+                        item =>
+                            item.Id == id &&
+                            !item.IsDeleted,
+                        category
+                    );
+
+            if (categoryResult.MatchedCount == 0)
+            {
+                await session
+                    .AbortTransactionAsync();
+
+                return NotFound(
+                    ApiResponse<Category>.Fail(
+                        "Categoría no encontrada"
+                    )
+                );
+            }
+
+            if (!string.Equals(
+                    previousName,
+                    category.Name,
+                    StringComparison.Ordinal))
+            {
+                var productUpdate =
+                    Builders<Product>.Update
+                        .Set(
+                            product =>
+                                product.CategoryName,
+                            category.Name
+                        )
+                        .Set(
+                            product =>
+                                product.Category,
+                            category.Name
+                        )
+                        .Set(
+                            product =>
+                                product.UpdatedAt,
+                            DateTime.UtcNow
+                        );
+
+                await _db.Products
+                    .UpdateManyAsync(
+                        session,
+                        product =>
+                            product.CategoryId == id &&
+                            !product.IsDeleted,
+                        productUpdate
+                    );
+            }
+
+            await session
+                .CommitTransactionAsync();
+        }
+        catch
+        {
+            await session
+                .AbortTransactionAsync();
+
+            throw;
         }
 
         return Ok(
@@ -268,25 +375,63 @@ public class CategoriesController : ControllerBase
         string id,
         [FromQuery] bool isActive)
     {
-        if (string.IsNullOrWhiteSpace(id))
+        var category =
+            await _db.Categories
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+        if (category == null)
         {
-            return BadRequest(
+            return NotFound(
                 ApiResponse<string>.Fail(
-                    "El identificador de la categoría es obligatorio"
+                    "Categoría no encontrada"
                 )
             );
         }
 
-        var update = Builders<Category>.Update
-            .Set(category => category.IsActive, isActive)
-            .Set(category => category.UpdatedAt, DateTime.UtcNow);
+        if (!isActive)
+        {
+            var hasActiveProducts =
+                await _db.Products
+                    .Find(product =>
+                        product.CategoryId == id &&
+                        !product.IsDeleted &&
+                        product.IsActive)
+                    .AnyAsync();
 
-        var result = await _db.Categories.UpdateOneAsync(
-            category =>
-                category.Id == id &&
-                !category.IsDeleted,
-            update
-        );
+            if (hasActiveProducts)
+            {
+                return BadRequest(
+                    ApiResponse<string>.Fail(
+                        "No se puede desactivar la categoría porque tiene productos activos"
+                    )
+                );
+            }
+        }
+
+        var update =
+            Builders<Category>.Update
+                .Set(
+                    item =>
+                        item.IsActive,
+                    isActive
+                )
+                .Set(
+                    item =>
+                        item.UpdatedAt,
+                    DateTime.UtcNow
+                );
+
+        var result =
+            await _db.Categories
+                .UpdateOneAsync(
+                    item =>
+                        item.Id == id &&
+                        !item.IsDeleted,
+                    update
+                );
 
         if (result.MatchedCount == 0)
         {
@@ -297,41 +442,82 @@ public class CategoriesController : ControllerBase
             );
         }
 
-        var message = isActive
-            ? "Categoría activada correctamente"
-            : "Categoría desactivada correctamente";
-
-        return Ok(ApiResponse<string>.Ok(message));
+        return Ok(
+            ApiResponse<string>.Ok(
+                isActive
+                    ? "Categoría activada correctamente"
+                    : "Categoría desactivada correctamente"
+            )
+        );
     }
 
     // =========================================================
     // DELETE: api/Categories/{id}
-    // Eliminación lógica. Solo Admin.
+    // Solo Admin.
     // =========================================================
     [HttpDelete("{id}")]
     [Authorize(Roles = "Admin")]
-    public async Task<IActionResult> Delete(string id)
+    public async Task<IActionResult> Delete(
+        string id)
     {
-        if (string.IsNullOrWhiteSpace(id))
+        var category =
+            await _db.Categories
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+        if (category == null)
         {
-            return BadRequest(
+            return NotFound(
                 ApiResponse<string>.Fail(
-                    "El identificador de la categoría es obligatorio"
+                    "Categoría no encontrada"
                 )
             );
         }
 
-        var update = Builders<Category>.Update
-            .Set(category => category.IsDeleted, true)
-            .Set(category => category.IsActive, false)
-            .Set(category => category.UpdatedAt, DateTime.UtcNow);
+        var hasProducts =
+            await _db.Products
+                .Find(product =>
+                    product.CategoryId == id &&
+                    !product.IsDeleted)
+                .AnyAsync();
 
-        var result = await _db.Categories.UpdateOneAsync(
-            category =>
-                category.Id == id &&
-                !category.IsDeleted,
-            update
-        );
+        if (hasProducts)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "No se puede eliminar una categoría con productos relacionados. Puedes desactivarla después de desactivar sus productos."
+                )
+            );
+        }
+
+        var update =
+            Builders<Category>.Update
+                .Set(
+                    item =>
+                        item.IsDeleted,
+                    true
+                )
+                .Set(
+                    item =>
+                        item.IsActive,
+                    false
+                )
+                .Set(
+                    item =>
+                        item.UpdatedAt,
+                    DateTime.UtcNow
+                );
+
+        var result =
+            await _db.Categories
+                .UpdateOneAsync(
+                    item =>
+                        item.Id == id &&
+                        !item.IsDeleted,
+                    update
+                );
 
         if (result.MatchedCount == 0)
         {
@@ -351,19 +537,26 @@ public class CategoriesController : ControllerBase
 
     private static string? ValidateCategory(
         string name,
-        string description)
+        string? description)
     {
         if (string.IsNullOrWhiteSpace(name))
-            return "El nombre de la categoría es obligatorio";
+        {
+            return
+                "El nombre de la categoría es obligatorio";
+        }
 
-        if (name.Trim().Length < 3)
-            return "El nombre debe tener al menos 3 caracteres";
-
-        if (name.Trim().Length > 80)
-            return "El nombre no puede superar los 80 caracteres";
+        if (name.Trim().Length < 3 ||
+            name.Trim().Length > 80)
+        {
+            return
+                "El nombre debe tener entre 3 y 80 caracteres";
+        }
 
         if (description?.Trim().Length > 300)
-            return "La descripción no puede superar los 300 caracteres";
+        {
+            return
+                "La descripción no puede superar los 300 caracteres";
+        }
 
         return null;
     }
