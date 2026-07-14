@@ -1,4 +1,6 @@
-﻿using MongoDB.Bson.Serialization.Attributes;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
+using Volts.Api.Models.Enums;
 
 namespace Volts.Api.Models;
 
@@ -6,55 +8,35 @@ namespace Volts.Api.Models;
 public class Recipe : BaseEntity
 {
     public string Code { get; set; } = string.Empty;
-
     public string ProductId { get; set; } = string.Empty;
-
     public string ProductName { get; set; } = string.Empty;
-
     public int Version { get; set; } = 1;
-
     public string Notes { get; set; } = string.Empty;
-
     public decimal EstimatedUnitCost { get; set; }
-
+    [BsonRepresentation(BsonType.String)]
+    public RecipeStatus Status { get; set; } = RecipeStatus.Draft;
     public List<RecipeDetail> Details { get; set; } = new();
 
-    public bool IsActive { get; set; } = true;
+    // Compatibilidad con consultas existentes.
+    public bool IsActive { get; set; }
 }
 
 public class RecipeDetail
 {
     public string RawMaterialId { get; set; } = string.Empty;
-
     public string RawMaterialCode { get; set; } = string.Empty;
-
     public string RawMaterialName { get; set; } = string.Empty;
-
+    public string UnitOfMeasureId { get; set; } = string.Empty;
+    public string UnitCode { get; set; } = string.Empty;
+    public string UnitName { get; set; } = string.Empty;
+    public string UnitSymbol { get; set; } = string.Empty;
+    public bool UnitAllowsDecimals { get; set; }
+    public int UnitDecimalPlaces { get; set; }
     public string Unit { get; set; } = string.Empty;
-
-    /*
-     * Cantidad neta requerida para fabricar una unidad.
-     */
     public decimal QuantityRequired { get; set; }
-
-    /*
-     * Porcentaje adicional considerado por pérdidas
-     * normales del proceso.
-     *
-     * Ejemplo:
-     * QuantityRequired = 1
-     * WastePercentage = 10
-     * Cantidad total calculada = 1.10
-     */
     public decimal WastePercentage { get; set; }
-
-    /*
-     * Indica si en el futuro este componente puede
-     * abastecerse con sobrantes recuperables.
-     */
+    public decimal TotalQuantityPerUnit { get; set; }
     public bool AcceptsRecoveredWaste { get; set; }
-
     public decimal EstimatedUnitCost { get; set; }
-
     public decimal EstimatedSubtotal { get; set; }
 }
