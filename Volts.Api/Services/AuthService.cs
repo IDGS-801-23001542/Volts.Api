@@ -1,4 +1,4 @@
-﻿using MongoDB.Driver;
+using MongoDB.Driver;
 using Volts.Api.DTOs;
 using Volts.Api.Models;
 using Volts.Api.Models.Common;
@@ -11,21 +11,27 @@ public class AuthService
 {
     private readonly MongoDbService _db;
     private readonly JwtService _jwtService;
+    private readonly AuditTrailService _audit;
+    private readonly NotificationDispatchService _notifications;
 
     public AuthService(
         MongoDbService db,
-        JwtService jwtService)
+        JwtService jwtService,
+        AuditTrailService audit,
+        NotificationDispatchService notifications)
     {
         _db = db;
         _jwtService = jwtService;
+        _audit = audit;
+        _notifications = notifications;
     }
 
     public async Task<ApiResponse<LoginResponseDto>>
-        LoginAsync(LoginRequestDto dto)
+        LoginAsync(LoginRequestDto dto, string? ipAddress = null, string? userAgent = null, string? correlationId = null)
     {
-        var normalizedEmail = NormalizeEmail(dto.Email);
+        var email = NormalizeEmail(dto.Email);
 
-        if (string.IsNullOrWhiteSpace(normalizedEmail) ||
+        if (string.IsNullOrWhiteSpace(email) ||
             string.IsNullOrWhiteSpace(dto.Password))
         {
             return ApiResponse<LoginResponseDto>.Fail(
@@ -34,13 +40,36 @@ public class AuthService
         }
 
         var user = await _db.Users
-            .Find(x =>
-                x.Email == normalizedEmail &&
-                !x.IsDeleted)
+            .Find(item =>
+                item.Email == email &&
+                !item.IsDeleted)
             .FirstOrDefaultAsync();
 
-        if (user == null)
+        if (user == null ||
+            !BCrypt.Net.BCrypt.Verify(
+                dto.Password,
+                user.PasswordHash))
         {
+            if (user != null)
+            {
+                await RegisterFailedLoginAsync(user);
+            }
+
+            await _audit.WriteAsync(
+                user?.Id, user?.FullName ?? email, user?.RoleName,
+                user == null ? "PublicVisitor" : "AuthenticatedUser",
+                "Seguridad", "Autenticación", "Inicio de sesión fallido", "Sesión",
+                $"Se rechazó un intento de inicio de sesión para {email}.", 400,
+                "POST", "/api/Auth/login", correlationId ?? Guid.NewGuid().ToString("N"),
+                ipAddress, userAgent, user?.Id);
+
+            if (user != null && user.LockoutEnd.HasValue)
+            {
+                await _notifications.NotifyRolesAsync(new[]{"Admin"}, "Cuenta bloqueada",
+                    $"La cuenta {user.Email} fue bloqueada temporalmente por intentos fallidos.",
+                    "Security", "High", "Administración", "/backoffice/usuarios", "User", user.Id, null, user.Id);
+            }
+
             return ApiResponse<LoginResponseDto>.Fail(
                 "Correo o contraseña incorrectos"
             );
@@ -56,52 +85,42 @@ public class AuthService
         if (user.LockoutEnd.HasValue &&
             user.LockoutEnd.Value > DateTime.UtcNow)
         {
-            var remainingMinutes = Math.Max(
-                1,
-                (int)Math.Ceiling(
-                    (user.LockoutEnd.Value - DateTime.UtcNow)
-                    .TotalMinutes
-                )
-            );
-
             return ApiResponse<LoginResponseDto>.Fail(
-                $"Usuario bloqueado temporalmente. Intenta nuevamente en {remainingMinutes} minuto(s)"
+                "Usuario bloqueado temporalmente"
             );
         }
 
-        var validPassword = BCrypt.Net.BCrypt.Verify(
-            dto.Password,
-            user.PasswordHash
-        );
+        var role = await _db.Roles
+            .Find(item =>
+                item.Id == user.RoleId &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
 
-        if (!validPassword)
-        {
-            await RegisterFailedLoginAsync(user);
-
-            return ApiResponse<LoginResponseDto>.Fail(
-                "Correo o contraseña incorrectos"
-            );
-        }
-
-        /*
-         * Corrige automáticamente usuarios antiguos que todavía
-         * no tienen UserType almacenado.
-         */
-        user.UserType = ResolveUserType(user.RoleName);
         user.FailedLoginAttempts = 0;
         user.LockoutEnd = null;
         user.LastLoginAt = DateTime.UtcNow;
         user.UpdatedAt = DateTime.UtcNow;
 
         await _db.Users.ReplaceOneAsync(
-            x => x.Id == user.Id,
+            item => item.Id == user.Id,
             user
         );
 
         var token = _jwtService.GenerateToken(user);
 
+        await _audit.WriteAsync(
+            user.Id, user.FullName, user.RoleName, "AuthenticatedUser",
+            "Seguridad", "Autenticación", "Iniciar sesión", "Sesión",
+            $"{user.FullName} inició sesión correctamente.", 200,
+            "POST", "/api/Auth/login", correlationId ?? Guid.NewGuid().ToString("N"),
+            ipAddress, userAgent, user.Id);
+
         return ApiResponse<LoginResponseDto>.Ok(
-            BuildLoginResponse(user, token),
+            BuildLoginResponse(
+                user,
+                token,
+                role?.Permissions ?? []
+            ),
             "Login correcto"
         );
     }
@@ -109,19 +128,12 @@ public class AuthService
     public async Task<ApiResponse<User>>
         CreateUserAsync(CreateUserDto dto)
     {
-        var normalizedEmail = NormalizeEmail(dto.Email);
+        var email = NormalizeEmail(dto.Email);
 
-        if (string.IsNullOrWhiteSpace(normalizedEmail))
+        if (!IsValidEmail(email))
         {
             return ApiResponse<User>.Fail(
-                "El correo electrónico es obligatorio"
-            );
-        }
-
-        if (!IsValidEmail(normalizedEmail))
-        {
-            return ApiResponse<User>.Fail(
-                "El correo electrónico no tiene un formato válido"
+                "El correo electrónico no es válido"
             );
         }
 
@@ -133,24 +145,19 @@ public class AuthService
             );
         }
 
-        var nameResult = BuildPersonName(
-            dto.FirstNames,
-            dto.PaternalLastName,
-            dto.MaternalLastName,
-            dto.FullName
-        );
-
-        if (!nameResult.Success || nameResult.Name == null)
+        if (string.IsNullOrWhiteSpace(dto.FirstNames) ||
+            string.IsNullOrWhiteSpace(
+                dto.PaternalLastName))
         {
             return ApiResponse<User>.Fail(
-                nameResult.ErrorMessage
+                "Los nombres y el apellido paterno son obligatorios"
             );
         }
 
         var exists = await _db.Users
-            .Find(x =>
-                x.Email == normalizedEmail &&
-                !x.IsDeleted)
+            .Find(item =>
+                item.Email == email &&
+                !item.IsDeleted)
             .AnyAsync();
 
         if (exists)
@@ -160,14 +167,11 @@ public class AuthService
             );
         }
 
-        var normalizedRoleName =
-            NormalizeRoleName(dto.RoleName);
-
         var role = await _db.Roles
-            .Find(x =>
-                x.Name == normalizedRoleName &&
-                x.IsActive &&
-                !x.IsDeleted)
+            .Find(item =>
+                item.Name == dto.RoleName &&
+                item.IsActive &&
+                !item.IsDeleted)
             .FirstOrDefaultAsync();
 
         if (role == null)
@@ -177,23 +181,35 @@ public class AuthService
             );
         }
 
+        if (role.Name is "Client" or "Institution")
+        {
+            return ApiResponse<User>.Fail(
+                "Los clientes e instituciones deben registrarse desde su flujo de portal"
+            );
+        }
+
         var user = new User
         {
-            Name = nameResult.Name,
-            LegacyFullName = null,
-            Email = normalizedEmail,
+            Name = new PersonName
+            {
+                FirstNames = dto.FirstNames.Trim(),
+                PaternalLastName =
+                    dto.PaternalLastName.Trim(),
+                MaternalLastName =
+                    NormalizeOptional(
+                        dto.MaternalLastName)
+            },
+            Email = email,
             PasswordHash =
                 BCrypt.Net.BCrypt.HashPassword(
-                    dto.Password
-                ),
+                    dto.Password),
             RoleId = role.Id,
             RoleName = role.Name,
-            UserType = ResolveUserType(role.Name),
-            ProfileId = null,
+            UserType =
+                UserType.Employee,
             IsActive = true,
-            IsEmailConfirmed = false,
-            TwoFactorEnabled = false,
-            FailedLoginAttempts = 0,
+            IsEmailConfirmed = true,
+            IsDeleted = false,
             CreatedAt = DateTime.UtcNow
         };
 
@@ -208,24 +224,25 @@ public class AuthService
     public async Task<ApiResponse<LoginResponseDto>>
         RegisterClientAsync(RegisterClientDto dto)
     {
-        var normalizedEmail = NormalizeEmail(dto.Email);
+        var email = NormalizeEmail(dto.Email);
 
-        if (string.IsNullOrWhiteSpace(normalizedEmail))
+        if (!IsValidEmail(email))
         {
             return ApiResponse<LoginResponseDto>.Fail(
-                "El correo electrónico es obligatorio"
+                "El correo electrónico no es válido"
             );
         }
 
-        if (!IsValidEmail(normalizedEmail))
+        if (string.IsNullOrWhiteSpace(dto.FirstNames) ||
+            string.IsNullOrWhiteSpace(
+                dto.PaternalLastName))
         {
             return ApiResponse<LoginResponseDto>.Fail(
-                "El correo electrónico no tiene un formato válido"
+                "Los nombres y el apellido paterno son obligatorios"
             );
         }
 
-        if (string.IsNullOrWhiteSpace(dto.Password) ||
-            dto.Password.Length < 8)
+        if (dto.Password.Length < 8)
         {
             return ApiResponse<LoginResponseDto>.Fail(
                 "La contraseña debe tener al menos 8 caracteres"
@@ -239,57 +256,51 @@ public class AuthService
             );
         }
 
-        var nameResult = BuildPersonName(
-            dto.FirstNames,
-            dto.PaternalLastName,
-            dto.MaternalLastName,
-            dto.FullName
-        );
+        var phone = NormalizeOptional(dto.Phone);
 
-        if (!nameResult.Success || nameResult.Name == null)
+        if (phone != null &&
+            (phone.Length != 10 ||
+             phone.Any(character =>
+                 !char.IsDigit(character))))
         {
             return ApiResponse<LoginResponseDto>.Fail(
-                nameResult.ErrorMessage
+                "El teléfono debe contener exactamente 10 dígitos"
             );
         }
 
-        var userExists = await _db.Users
-            .Find(x =>
-                x.Email == normalizedEmail &&
-                !x.IsDeleted)
-            .AnyAsync();
-
-        if (userExists)
+        if (await _db.Users
+            .Find(item =>
+                item.Email == email &&
+                !item.IsDeleted)
+            .AnyAsync())
         {
             return ApiResponse<LoginResponseDto>.Fail(
                 "Ya existe una cuenta con ese correo"
             );
         }
 
-        var customerExists = await _db.Customers
-            .Find(x =>
-                x.Email == normalizedEmail &&
-                !x.IsDeleted)
-            .AnyAsync();
-
-        if (customerExists)
+        if (await _db.Customers
+            .Find(item =>
+                item.Email == email &&
+                !item.IsDeleted)
+            .AnyAsync())
         {
             return ApiResponse<LoginResponseDto>.Fail(
-                "Ya existe un cliente registrado con ese correo"
+                "Ya existe un cliente con ese correo"
             );
         }
 
-        var clientRole = await _db.Roles
-            .Find(x =>
-                x.Name == "Client" &&
-                x.IsActive &&
-                !x.IsDeleted)
+        var role = await _db.Roles
+            .Find(item =>
+                item.Name == "Client" &&
+                item.IsActive &&
+                !item.IsDeleted)
             .FirstOrDefaultAsync();
 
-        if (clientRole == null)
+        if (role == null)
         {
             return ApiResponse<LoginResponseDto>.Fail(
-                "El rol de cliente no está configurado"
+                "El rol Client no está configurado"
             );
         }
 
@@ -300,23 +311,29 @@ public class AuthService
 
         try
         {
+            var name = new PersonName
+            {
+                FirstNames = dto.FirstNames.Trim(),
+                PaternalLastName =
+                    dto.PaternalLastName.Trim(),
+                MaternalLastName =
+                    NormalizeOptional(
+                        dto.MaternalLastName)
+            };
+
             var user = new User
             {
-                Name = nameResult.Name,
-                LegacyFullName = null,
-                Email = normalizedEmail,
+                Name = name,
+                Email = email,
                 PasswordHash =
                     BCrypt.Net.BCrypt.HashPassword(
-                        dto.Password
-                    ),
-                RoleId = clientRole.Id,
-                RoleName = clientRole.Name,
+                        dto.Password),
+                RoleId = role.Id,
+                RoleName = role.Name,
                 UserType = UserType.Customer,
-                ProfileId = null,
                 IsActive = true,
                 IsEmailConfirmed = false,
-                TwoFactorEnabled = false,
-                FailedLoginAttempts = 0,
+                IsDeleted = false,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -325,17 +342,11 @@ public class AuthService
                 user
             );
 
-            /*
-             * Customer todavía conserva temporalmente su modelo
-             * anterior. Lo migraremos en el siguiente paso.
-             */
             var customer = new Customer
             {
-                CustomerType = "Individual",
-                FullName = nameResult.Name.FullName,
-                InstitutionName = null,
-                Email = normalizedEmail,
-                Phone = NormalizeOptional(dto.Phone),
+                Name = name,
+                Email = email,
+                Phone = phone,
                 Address = null,
                 IsActive = true,
                 IsDeleted = false,
@@ -349,11 +360,10 @@ public class AuthService
             );
 
             user.ProfileId = customer.Id;
-            user.UpdatedAt = DateTime.UtcNow;
 
             await _db.Users.ReplaceOneAsync(
                 session,
-                x => x.Id == user.Id,
+                item => item.Id == user.Id,
                 user
             );
 
@@ -363,7 +373,11 @@ public class AuthService
                 _jwtService.GenerateToken(user);
 
             return ApiResponse<LoginResponseDto>.Ok(
-                BuildLoginResponse(user, token),
+                BuildLoginResponse(
+                    user,
+                    token,
+                    role.Permissions
+                ),
                 "Cuenta creada correctamente"
             );
         }
@@ -372,7 +386,7 @@ public class AuthService
             await session.AbortTransactionAsync();
 
             return ApiResponse<LoginResponseDto>.Fail(
-                "No fue posible completar el registro. Intenta nuevamente"
+                "No fue posible completar el registro"
             );
         }
     }
@@ -386,25 +400,21 @@ public class AuthService
         {
             user.LockoutEnd =
                 DateTime.UtcNow.AddMinutes(15);
-
-            /*
-             * Reiniciamos el contador porque el bloqueo ya fue
-             * aplicado. Después del periodo podrá volver a intentar.
-             */
             user.FailedLoginAttempts = 0;
         }
 
         user.UpdatedAt = DateTime.UtcNow;
 
         await _db.Users.ReplaceOneAsync(
-            x => x.Id == user.Id,
+            item => item.Id == user.Id,
             user
         );
     }
 
     private static LoginResponseDto BuildLoginResponse(
         User user,
-        string token)
+        string token,
+        List<string> permissions)
     {
         return new LoginResponseDto
         {
@@ -419,36 +429,8 @@ public class AuthService
             Email = user.Email,
             RoleName = user.RoleName,
             UserType = user.UserType,
-            ProfileId = user.ProfileId
-        };
-    }
-
-    private static UserType ResolveUserType(
-        string roleName)
-    {
-        return roleName switch
-        {
-            "Admin" => UserType.Employee,
-            "Employee" => UserType.Employee,
-            "Institution" => UserType.Institution,
-            _ => UserType.Customer
-        };
-    }
-
-    private static string NormalizeRoleName(
-        string? roleName)
-    {
-        if (string.IsNullOrWhiteSpace(roleName))
-            return "Employee";
-
-        return roleName.Trim().ToLowerInvariant()
-            switch
-        {
-            "admin" => "Admin",
-            "employee" => "Employee",
-            "client" => "Client",
-            "institution" => "Institution",
-            _ => roleName.Trim()
+            ProfileId = user.ProfileId,
+            Permissions = permissions
         };
     }
 
@@ -467,124 +449,19 @@ public class AuthService
             : value.Trim();
     }
 
-    private static bool IsValidEmail(
-        string email)
+    private static bool IsValidEmail(string email)
     {
         try
         {
             var address =
-                new System.Net.Mail.MailAddress(email);
+                new System.Net.Mail.MailAddress(
+                    email);
 
             return address.Address == email;
         }
         catch
         {
             return false;
-        }
-    }
-
-    private static PersonNameResult BuildPersonName(
-        string? firstNames,
-        string? paternalLastName,
-        string? maternalLastName,
-        string? legacyFullName)
-    {
-        var normalizedFirstNames =
-            NormalizeOptional(firstNames);
-
-        var normalizedPaternalLastName =
-            NormalizeOptional(paternalLastName);
-
-        var normalizedMaternalLastName =
-            NormalizeOptional(maternalLastName);
-
-        if (!string.IsNullOrWhiteSpace(
-                normalizedFirstNames) &&
-            !string.IsNullOrWhiteSpace(
-                normalizedPaternalLastName))
-        {
-            return PersonNameResult.Ok(
-                new PersonName
-                {
-                    FirstNames =
-                        normalizedFirstNames,
-                    PaternalLastName =
-                        normalizedPaternalLastName,
-                    MaternalLastName =
-                        normalizedMaternalLastName
-                }
-            );
-        }
-
-        /*
-         * Compatibilidad con el formulario Angular anterior.
-         * El último elemento se toma como apellido paterno.
-         */
-        var normalizedLegacyName =
-            NormalizeOptional(legacyFullName);
-
-        if (string.IsNullOrWhiteSpace(
-                normalizedLegacyName))
-        {
-            return PersonNameResult.Fail(
-                "Los nombres y el apellido paterno son obligatorios"
-            );
-        }
-
-        var parts = normalizedLegacyName
-            .Split(
-                ' ',
-                StringSplitOptions.RemoveEmptyEntries |
-                StringSplitOptions.TrimEntries
-            );
-
-        if (parts.Length < 2)
-        {
-            return PersonNameResult.Fail(
-                "Ingresa al menos un nombre y un apellido"
-            );
-        }
-
-        return PersonNameResult.Ok(
-            new PersonName
-            {
-                FirstNames = string.Join(
-                    " ",
-                    parts.Take(parts.Length - 1)
-                ),
-                PaternalLastName = parts[^1],
-                MaternalLastName = null
-            }
-        );
-    }
-
-    private sealed class PersonNameResult
-    {
-        public bool Success { get; private init; }
-
-        public PersonName? Name { get; private init; }
-
-        public string ErrorMessage { get; private init; }
-            = string.Empty;
-
-        public static PersonNameResult Ok(
-            PersonName name)
-        {
-            return new PersonNameResult
-            {
-                Success = true,
-                Name = name
-            };
-        }
-
-        public static PersonNameResult Fail(
-            string message)
-        {
-            return new PersonNameResult
-            {
-                Success = false,
-                ErrorMessage = message
-            };
         }
     }
 }

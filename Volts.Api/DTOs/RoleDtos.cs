@@ -1,4 +1,4 @@
-﻿namespace Volts.Api.DTOs;
+namespace Volts.Api.DTOs;
 
 public class RoleCreateDto
 {
