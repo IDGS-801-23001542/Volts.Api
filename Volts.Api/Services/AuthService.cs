@@ -331,15 +331,31 @@ public class AuthService
              */
             var customer = new Customer
             {
+                Name = nameResult.Name,
+
+                // Compatibilidad temporal
+                LegacyFullName = nameResult.Name.FullName,
+
                 CustomerType = "Individual",
-                FullName = nameResult.Name.FullName,
+
                 InstitutionName = null,
+
                 Email = normalizedEmail,
+
                 Phone = NormalizeOptional(dto.Phone),
-                Address = null,
+
+                StructuredAddress = null,
+
+                LegacyAddress = null,
+
+                UserId = user.Id,
+
                 IsActive = true,
+
                 IsDeleted = false,
+
                 CreatedAt = DateTime.UtcNow,
+
                 CreatedBy = user.Id
             };
 
