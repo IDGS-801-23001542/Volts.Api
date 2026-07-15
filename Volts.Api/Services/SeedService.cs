@@ -1,4 +1,4 @@
-﻿using MongoDB.Driver;
+using MongoDB.Driver;
 using Volts.Api.Models;
 using Volts.Api.Models.Common;
 using Volts.Api.Models.Enums;
@@ -19,14 +19,19 @@ public class SeedService
     {
         await SeedRolesAsync();
         await SeedEmployeeAsync();
+        await SeedCustomersAsync();
+        await SeedInstitutionsAsync();
         await SeedUnitsAsync();
         await SeedCategoriesAsync();
         await SeedProductsAsync();
+        await SeedCommercialPlansAsync();
+        await SeedCommercialPackagesAsync();
         await SeedSuppliersAsync();
         await SeedRawMaterialsAsync();
         await SeedInitialPurchasesAsync();
         await EnsureIndexesAsync();
     }
+
 
     private async Task SeedRolesAsync()
     {
@@ -45,29 +50,24 @@ public class SeedService
             new Role
             {
                 Name = "Employee",
-                Description = "Empleado operativo del backoffice",
+                Description = "Empleado operativo del backoffice sin acceso a usuarios ni roles",
                 Permissions = new List<string>
                 {
-                    "dashboard.read",
-                    "products.read",
-                    "categories.read",
-                    "raw-materials.read",
-                    "raw-materials.create",
-                    "raw-materials.update",
-                    "raw-materials.stock",
-                    "suppliers.read",
-                    "suppliers.create",
-                    "suppliers.update",
-                    "purchases.read",
-                    "purchases.create",
-                    "recipes.read",
-                    "recipes.create",
-                    "recipes.update",
+                    "commercial.customers.read",
+                    "commercial.customers.manage",
+                    "commercial.plans.manage",
+                    "commercial.quotes.manage",
+                    "commercial.orders.manage",
+                    "commercial.sales.manage",
+                    "commercial.licenses.manage",
+                    "inventory.read",
+                    "inventory.manage",
                     "production.read",
-                    "production.create",
-                    "production.update",
-                    "waste.read",
-                    "waste.create"
+                    "production.manage",
+                    "support.read",
+                    "support.manage",
+                    "content.manage",
+                    "analytics.read"
                 },
                 IsActive = true,
                 IsDeleted = false,
@@ -77,15 +77,23 @@ public class SeedService
             new Role
             {
                 Name = "Client",
-                Description = "Cliente del portal VOLTS",
+                Description = "Cliente con cuenta de acceso al portal individual",
                 Permissions = new List<string>
                 {
-                    "profile.read",
-                    "profile.update",
-                    "quotes.create",
-                    "quotes.read-own",
-                    "orders.read-own",
-                    "licenses.read-own"
+                    "portal.client.access"
+                },
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            },
+            new Role
+            {
+                Name = "Institution",
+                Description = "Institución con cuenta de acceso al portal institucional",
+                Permissions = new List<string>
+                {
+                    "portal.institution.access"
                 },
                 IsActive = true,
                 IsDeleted = false,
@@ -97,7 +105,9 @@ public class SeedService
         foreach (var role in roles)
         {
             var existing = await _db.Roles
-                .Find(x => x.Name == role.Name && !x.IsDeleted)
+                .Find(item =>
+                    item.Name == role.Name &&
+                    !item.IsDeleted)
                 .FirstOrDefaultAsync();
 
             if (existing == null)
@@ -106,6 +116,9 @@ public class SeedService
                 continue;
             }
 
+            /*
+             * Migra permisos heredados a las claves canónicas actuales.
+             */
             existing.Description = role.Description;
             existing.Permissions = role.Permissions;
             existing.IsActive = true;
@@ -113,11 +126,12 @@ public class SeedService
             existing.UpdatedBy = SeedUser;
 
             await _db.Roles.ReplaceOneAsync(
-                x => x.Id == existing.Id,
+                item => item.Id == existing.Id,
                 existing
             );
         }
     }
+
 
     private async Task SeedEmployeeAsync()
     {
@@ -194,6 +208,191 @@ public class SeedService
         );
     }
 
+
+    private async Task SeedCustomersAsync()
+    {
+        var customers = new[]
+        {
+            new Customer
+            {
+                Name = new PersonName
+                {
+                    FirstNames = "Pancracio",
+                    PaternalLastName = "Lomito",
+                    MaternalLastName = "Pérez"
+                },
+                Email = "pancracio.lomito@volts.test",
+                Phone = "4771001001",
+                Address = new Address
+                {
+                    Street = "Calle Croqueta Feliz",
+                    ExteriorNumber = "101",
+                    InteriorNumber = null,
+                    Neighborhood = "Lomas del Perrito",
+                    PostalCode = "37150",
+                    City = "León",
+                    State = "Guanajuato",
+                    Country = "México",
+                    References = "Casa con un letrero que dice aquí manda el perro."
+                },
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            },
+            new Customer
+            {
+                Name = new PersonName
+                {
+                    FirstNames = "Teófilo",
+                    PaternalLastName = "Croquetas",
+                    MaternalLastName = "Ramírez"
+                },
+                Email = "teofilo.croquetas@volts.test",
+                Phone = "4771001002",
+                Address = new Address
+                {
+                    Street = "Avenida Patita Digital",
+                    ExteriorNumber = "202",
+                    InteriorNumber = "B",
+                    Neighborhood = "El Coecillo",
+                    PostalCode = "37260",
+                    City = "León",
+                    State = "Guanajuato",
+                    Country = "México",
+                    References = "Frente a la tienda El Huesito Feliz."
+                },
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            },
+            new Customer
+            {
+                Name = new PersonName
+                {
+                    FirstNames = "Firulais Antonio",
+                    PaternalLastName = "Del Roble",
+                    MaternalLastName = "Sánchez"
+                },
+                Email = "firulais.roble@volts.test",
+                Phone = "4771001003",
+                Address = null,
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            }
+        };
+
+        foreach (var customer in customers)
+        {
+            var existing = await _db.Customers
+                .Find(item =>
+                    item.Email == customer.Email &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+            if (existing == null)
+            {
+                await _db.Customers.InsertOneAsync(customer);
+                continue;
+            }
+
+            existing.Name = customer.Name;
+            existing.Phone = customer.Phone;
+            existing.Address = customer.Address;
+            existing.IsActive = true;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = SeedUser;
+
+            await _db.Customers.ReplaceOneAsync(
+                item => item.Id == existing.Id,
+                existing
+            );
+        }
+    }
+
+    private async Task SeedInstitutionsAsync()
+    {
+        var institutions = new[]
+        {
+            BuildInstitution(
+                "Jardín de Niños Patitas del Saber",
+                "Lupita",
+                "Galletitas",
+                "Mendoza",
+                "Directora de Aventuras",
+                "lupita.galletitas@patitas.test",
+                "4772002001",
+                "Calle Aprendizaje Canino",
+                "15",
+                "San Juan Bosco",
+                "37330",
+                85,
+                "Tienen recreo largo y un comité oficial de mascotas."
+            ),
+            BuildInstitution(
+                "Kinder Pequeños Inventores del Bajío",
+                "Tomás",
+                "Tornillito",
+                "Pérez",
+                "Coordinador de Robots",
+                "tomas.tornillito@inventores.test",
+                "4772002002",
+                "Boulevard Circuito Feliz",
+                "404",
+                "Jardines del Moral",
+                "37160",
+                120,
+                "Su mascota escolar se llama Byte."
+            ),
+            BuildInstitution(
+                "Instituto Preescolar Firulais Einstein",
+                "Roberta",
+                "Croquetina",
+                "López",
+                "Rectora de Ciencias Perrunas",
+                "roberta.croquetina@firulais.test",
+                "4772002003",
+                "Avenida Nikola Tesla",
+                "88",
+                "La Martinica",
+                "37500",
+                60,
+                "Cada viernes realizan el laboratorio GuauTech."
+            )
+        };
+
+        foreach (var institution in institutions)
+        {
+            var existing = await _db.Institutions
+                .Find(item =>
+                    item.Name == institution.Name &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+            if (existing == null)
+            {
+                await _db.Institutions.InsertOneAsync(institution);
+                continue;
+            }
+
+            existing.Responsible = institution.Responsible;
+            existing.Address = institution.Address;
+            existing.EstimatedStudents = institution.EstimatedStudents;
+            existing.Notes = institution.Notes;
+            existing.IsActive = true;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = SeedUser;
+
+            await _db.Institutions.ReplaceOneAsync(
+                item => item.Id == existing.Id,
+                existing
+            );
+        }
+    }
+
     private async Task SeedUnitsAsync()
     {
         var units = new[]
@@ -265,6 +464,251 @@ public class SeedService
             {
                 await _db.Products.InsertOneAsync(product);
             }
+        }
+    }
+
+
+    private async Task SeedCommercialPlansAsync()
+    {
+        var plans = new[]
+        {
+            new CommercialPlan
+            {
+                Name = "Plan Individual",
+                Code = "PLAN-INDIVIDUAL",
+                Description = "Plan para aprendizaje individual en casa con soporte básico y actualizaciones.",
+                Audience = "Familias, estudiantes y aprendizaje individual",
+                WarrantyMonths = 12,
+                SupportLevel = "Basic",
+                IncludesTraining = false,
+                IncludesDocumentation = true,
+                IncludesUpdates = true,
+                DisplayOrder = 1,
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            },
+            new CommercialPlan
+            {
+                Name = "Plan Educativo",
+                Code = "PLAN-EDUCATIVO",
+                Description = "Plan para docentes, talleres y pequeños grupos educativos.",
+                Audience = "Docentes, talleres, escuelas y centros educativos",
+                WarrantyMonths = 18,
+                SupportLevel = "Standard",
+                IncludesTraining = true,
+                IncludesDocumentation = true,
+                IncludesUpdates = true,
+                DisplayOrder = 2,
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            },
+            new CommercialPlan
+            {
+                Name = "Plan Institucional",
+                Code = "PLAN-INSTITUCIONAL",
+                Description = "Plan para implementaciones institucionales con atención prioritaria.",
+                Audience = "Universidades, instituciones y laboratorios",
+                WarrantyMonths = 24,
+                SupportLevel = "Priority",
+                IncludesTraining = true,
+                IncludesDocumentation = true,
+                IncludesUpdates = true,
+                DisplayOrder = 3,
+                IsActive = true,
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                CreatedBy = SeedUser
+            }
+        };
+
+        foreach (var plan in plans)
+        {
+            var existing = await _db.CommercialPlans
+                .Find(item =>
+                    item.Code == plan.Code &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+            if (existing == null)
+            {
+                await _db.CommercialPlans.InsertOneAsync(plan);
+                continue;
+            }
+
+            existing.Name = plan.Name;
+            existing.Description = plan.Description;
+            existing.Audience = plan.Audience;
+            existing.WarrantyMonths = plan.WarrantyMonths;
+            existing.SupportLevel = plan.SupportLevel;
+            existing.IncludesTraining = plan.IncludesTraining;
+            existing.IncludesDocumentation = plan.IncludesDocumentation;
+            existing.IncludesUpdates = plan.IncludesUpdates;
+            existing.DisplayOrder = plan.DisplayOrder;
+            existing.IsActive = true;
+            existing.UpdatedAt = DateTime.UtcNow;
+            existing.UpdatedBy = SeedUser;
+
+            await _db.CommercialPlans.ReplaceOneAsync(
+                item => item.Id == existing.Id,
+                existing
+            );
+        }
+    }
+
+    private async Task SeedCommercialPackagesAsync()
+    {
+        var individualPlan = await _db.CommercialPlans
+            .Find(item =>
+                item.Code == "PLAN-INDIVIDUAL" &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        var educationalPlan = await _db.CommercialPlans
+            .Find(item =>
+                item.Code == "PLAN-EDUCATIVO" &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        var institutionalPlan = await _db.CommercialPlans
+            .Find(item =>
+                item.Code == "PLAN-INSTITUCIONAL" &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        var husky = await _db.Products
+            .Find(item =>
+                item.Slug == "volts-husky" &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        if (
+            individualPlan == null ||
+            educationalPlan == null ||
+            institutionalPlan == null ||
+            husky == null
+        )
+        {
+            return;
+        }
+
+        var packageDefinitions = new[]
+        {
+            new
+            {
+                Plan = individualPlan,
+                Name = "Kit Individual",
+                Code = "PKG-INDIVIDUAL-1",
+                Description = "Un VOLTS Husky para aprendizaje individual.",
+                Quantity = 1,
+                Price = husky.Price,
+                DisplayOrder = 1
+            },
+            new
+            {
+                Plan = educationalPlan,
+                Name = "Aula VOLTS 5",
+                Code = "PKG-AULA-5",
+                Description = "Paquete educativo con cinco unidades VOLTS Husky.",
+                Quantity = 5,
+                Price = decimal.Round(husky.Price * 5m * 0.95m, 2),
+                DisplayOrder = 2
+            },
+            new
+            {
+                Plan = institutionalPlan,
+                Name = "Laboratorio VOLTS 10",
+                Code = "PKG-LAB-10",
+                Description = "Paquete institucional con diez unidades VOLTS Husky.",
+                Quantity = 10,
+                Price = decimal.Round(husky.Price * 10m * 0.90m, 2),
+                DisplayOrder = 3
+            }
+        };
+
+        foreach (var definition in packageDefinitions)
+        {
+            var referencePrice = decimal.Round(
+                husky.Price * definition.Quantity,
+                2
+            );
+
+            var package = await _db.CommercialPackages
+                .Find(item =>
+                    item.Code == definition.Code &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
+
+            if (package == null)
+            {
+                package = new CommercialPackage
+                {
+                    CommercialPlanId = definition.Plan.Id,
+                    CommercialPlanName = definition.Plan.Name,
+                    Name = definition.Name,
+                    Code = definition.Code,
+                    Description = definition.Description,
+                    Price = definition.Price,
+                    ReferencePrice = referencePrice,
+                    Savings = decimal.Round(
+                        Math.Max(0, referencePrice - definition.Price),
+                        2
+                    ),
+                    Items = new List<CommercialPackageItem>
+                    {
+                        new()
+                        {
+                            ProductId = husky.Id,
+                            ProductName = husky.Name,
+                            Quantity = definition.Quantity,
+                            UnitPrice = husky.Price,
+                            Subtotal = referencePrice
+                        }
+                    },
+                    DisplayOrder = definition.DisplayOrder,
+                    IsActive = true,
+                    IsDeleted = false,
+                    CreatedAt = DateTime.UtcNow,
+                    CreatedBy = SeedUser
+                };
+
+                await _db.CommercialPackages.InsertOneAsync(package);
+                continue;
+            }
+
+            package.CommercialPlanId = definition.Plan.Id;
+            package.CommercialPlanName = definition.Plan.Name;
+            package.Name = definition.Name;
+            package.Description = definition.Description;
+            package.Price = definition.Price;
+            package.ReferencePrice = referencePrice;
+            package.Savings = decimal.Round(
+                Math.Max(0, referencePrice - definition.Price),
+                2
+            );
+            package.Items = new List<CommercialPackageItem>
+            {
+                new()
+                {
+                    ProductId = husky.Id,
+                    ProductName = husky.Name,
+                    Quantity = definition.Quantity,
+                    UnitPrice = husky.Price,
+                    Subtotal = referencePrice
+                }
+            };
+            package.DisplayOrder = definition.DisplayOrder;
+            package.IsActive = true;
+            package.UpdatedAt = DateTime.UtcNow;
+            package.UpdatedBy = SeedUser;
+
+            await _db.CommercialPackages.ReplaceOneAsync(
+                item => item.Id == package.Id,
+                package
+            );
         }
     }
 
@@ -642,6 +1086,12 @@ public class SeedService
         await CreateUniqueIndexAsync(_db.UnitsOfMeasure, Builders<UnitOfMeasure>.IndexKeys.Ascending(x => x.Code), "UX_UnitsOfMeasure_Code");
         await CreateUniqueIndexAsync(_db.Categories, Builders<Category>.IndexKeys.Ascending(x => x.Name), "UX_Categories_Name");
         await CreateUniqueIndexAsync(_db.Products, Builders<Product>.IndexKeys.Ascending(x => x.Slug), "UX_Products_Slug");
+        await CreateUniqueIndexAsync(_db.CommercialPlans, Builders<CommercialPlan>.IndexKeys.Ascending(x => x.Code), "UX_CommercialPlans_Code");
+        await CreateUniqueIndexAsync(_db.CommercialPackages, Builders<CommercialPackage>.IndexKeys.Ascending(x => x.Code), "UX_CommercialPackages_Code");
+        await CreateUniqueIndexAsync(_db.Quotes, Builders<Quote>.IndexKeys.Ascending(x => x.Folio), "UX_Quotes_Folio");
+        await CreateUniqueIndexAsync(_db.Orders, Builders<Order>.IndexKeys.Ascending(x => x.Folio), "UX_Orders_Folio");
+        await CreateUniqueIndexAsync(_db.Sales, Builders<Sale>.IndexKeys.Ascending(x => x.Folio), "UX_Sales_Folio");
+        await CreateUniqueIndexAsync(_db.Licenses, Builders<License>.IndexKeys.Ascending(x => x.LicenseCode), "UX_Licenses_Code");
         await CreateUniqueIndexAsync(_db.Suppliers, Builders<Supplier>.IndexKeys.Ascending(x => x.Code), "UX_Suppliers_Code");
         await CreateUniqueIndexAsync(_db.RawMaterials, Builders<RawMaterial>.IndexKeys.Ascending(x => x.Code), "UX_RawMaterials_Code");
         await CreateUniqueIndexAsync(_db.Purchases, Builders<Purchase>.IndexKeys.Ascending(x => x.Folio), "UX_Purchases_Folio");
@@ -728,6 +1178,59 @@ public class SeedService
             PhysicalStock = 0,
             ReservedStock = 0,
             MinimumFinishedStock = 5,
+            IsActive = true,
+            IsDeleted = false,
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = SeedUser
+        };
+    }
+
+
+    private static Institution BuildInstitution(
+        string name,
+        string firstNames,
+        string paternalLastName,
+        string maternalLastName,
+        string position,
+        string email,
+        string phone,
+        string street,
+        string exteriorNumber,
+        string neighborhood,
+        string postalCode,
+        int estimatedStudents,
+        string notes)
+    {
+        return new Institution
+        {
+            Name = name,
+            InstitutionType = InstitutionType.Other,
+            Responsible = new InstitutionResponsible
+            {
+                Name = new PersonName
+                {
+                    FirstNames = firstNames,
+                    PaternalLastName = paternalLastName,
+                    MaternalLastName = maternalLastName
+                },
+                Position = position,
+                Email = email,
+                Phone = phone
+            },
+            Address = new Address
+            {
+                Street = street,
+                ExteriorNumber = exteriorNumber,
+                InteriorNumber = null,
+                Neighborhood = neighborhood,
+                PostalCode = postalCode,
+                City = "León",
+                State = "Guanajuato",
+                Country = "México",
+                References = "Datos ficticios para pruebas de VOLTS."
+            },
+            EstimatedStudents = estimatedStudents,
+            Notes = notes,
             IsActive = true,
             IsDeleted = false,
             CreatedAt = DateTime.UtcNow,

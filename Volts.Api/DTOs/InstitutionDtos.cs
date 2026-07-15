@@ -1,16 +1,24 @@
-﻿namespace Volts.Api.DTOs;
+using Volts.Api.Models.Enums;
 
-public class InstitutionCreateDto
+namespace Volts.Api.DTOs;
+
+public class InstitutionCreateDto : PortalAccountRequestDto
 {
     public string Name { get; set; } = string.Empty;
-    public string ContactName { get; set; } = string.Empty;
-    public string Email { get; set; } = string.Empty;
-    public string? Phone { get; set; }
-    public string? Address { get; set; }
-    public string InstitutionType { get; set; } = string.Empty;
+    public InstitutionType InstitutionType { get; set; } = InstitutionType.Other;
+    public InstitutionResponsibleDto Responsible { get; set; } = new();
+    public AddressDto? Address { get; set; }
+    public int? EstimatedStudents { get; set; }
+    public string? Notes { get; set; }
 }
 
-public class InstitutionUpdateDto : InstitutionCreateDto
+public class InstitutionUpdateDto
 {
+    public string Name { get; set; } = string.Empty;
+    public InstitutionType InstitutionType { get; set; } = InstitutionType.Other;
+    public InstitutionResponsibleDto Responsible { get; set; } = new();
+    public AddressDto? Address { get; set; }
+    public int? EstimatedStudents { get; set; }
+    public string? Notes { get; set; }
     public bool IsActive { get; set; } = true;
 }

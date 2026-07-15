@@ -44,6 +44,16 @@ public class MongoDbService
             "Products"
         );
 
+    public IMongoCollection<CommercialPlan> CommercialPlans =>
+        _database.GetCollection<CommercialPlan>(
+            "CommercialPlans"
+        );
+
+    public IMongoCollection<CommercialPackage> CommercialPackages =>
+        _database.GetCollection<CommercialPackage>(
+            "CommercialPackages"
+        );
+
     public IMongoCollection<ContactMessage>
         ContactMessages =>
             _database.GetCollection<ContactMessage>(

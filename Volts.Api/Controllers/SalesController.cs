@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using Volts.Api.DTOs;
@@ -20,15 +21,12 @@ public class SalesController : ControllerBase
         _db = db;
     }
 
-    // =========================================================
-    // GET: api/Sales
-    // =========================================================
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
         var sales = await _db.Sales
-            .Find(sale => !sale.IsDeleted)
-            .SortByDescending(sale => sale.SaleDate)
+            .Find(item => !item.IsDeleted)
+            .SortByDescending(item => item.SaleDate)
             .ToListAsync();
 
         return Ok(
@@ -39,21 +37,9 @@ public class SalesController : ControllerBase
         );
     }
 
-    // =========================================================
-    // GET: api/Sales/{id}
-    // =========================================================
     [HttpGet("{id}")]
     public async Task<IActionResult> GetById(string id)
     {
-        if (string.IsNullOrWhiteSpace(id))
-        {
-            return BadRequest(
-                ApiResponse<Sale>.Fail(
-                    "El identificador de la venta es obligatorio"
-                )
-            );
-        }
-
         var sale = await _db.Sales
             .Find(item =>
                 item.Id == id &&
@@ -77,274 +63,327 @@ public class SalesController : ControllerBase
         );
     }
 
-    // =========================================================
-    // POST: api/Sales
-    //
-    // La venta valida disponibilidad y descuenta inventario
-    // terminado de cada producto.
-    // =========================================================
     [HttpPost]
     public async Task<IActionResult> Create(
         [FromBody] SaleCreateDto dto)
     {
-        if (string.IsNullOrWhiteSpace(dto.CustomerId))
+        if (string.IsNullOrWhiteSpace(dto.OrderId))
         {
             return BadRequest(
                 ApiResponse<Sale>.Fail(
-                    "Debes seleccionar un cliente"
+                    "Debes seleccionar un pedido"
                 )
             );
         }
 
-        if (dto.Details == null || dto.Details.Count == 0)
-        {
-            return BadRequest(
-                ApiResponse<Sale>.Fail(
-                    "La venta debe contener al menos un producto"
-                )
-            );
-        }
-
-        var customer = await _db.Customers
+        var order = await _db.Orders
             .Find(item =>
-                item.Id == dto.CustomerId &&
-                !item.IsDeleted &&
-                item.IsActive)
+                item.Id == dto.OrderId &&
+                !item.IsDeleted)
             .FirstOrDefaultAsync();
 
-        if (customer == null)
+        if (order == null)
+        {
+            return NotFound(
+                ApiResponse<Sale>.Fail(
+                    "Pedido no encontrado"
+                )
+            );
+        }
+
+        if (order.Status != "ReadyForSale")
         {
             return BadRequest(
                 ApiResponse<Sale>.Fail(
-                    "El cliente no existe o está inactivo"
+                    "Solo puede venderse un pedido listo para venta"
                 )
             );
         }
 
-        /*
-         * Agrupa productos repetidos para evitar que se valide
-         * el mismo inventario por separado.
-         */
-        var groupedItems = dto.Details
-            .GroupBy(item => item.ProductId)
-            .Select(group => new
-            {
-                ProductId = group.Key,
-                Quantity = group.Sum(item => item.Quantity)
-            })
-            .ToList();
-
-        if (groupedItems.Any(item =>
-            string.IsNullOrWhiteSpace(item.ProductId)))
+        if (order.Details.Any(item =>
+                item.PendingQuantity != 0 ||
+                item.ReservedQuantity !=
+                    item.RequestedQuantity))
         {
             return BadRequest(
                 ApiResponse<Sale>.Fail(
-                    "Todos los productos deben tener un identificador válido"
+                    "El pedido no tiene todas sus unidades reservadas"
                 )
             );
         }
 
-        if (groupedItems.Any(item => item.Quantity <= 0))
+        var existingSale = await _db.Sales
+            .Find(item =>
+                item.OrderId == order.Id &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        if (existingSale != null)
+        {
+            return Conflict(
+                ApiResponse<Sale>.Fail(
+                    "El pedido ya tiene una venta asociada"
+                )
+            );
+        }
+
+        var plan = await _db.CommercialPlans
+            .Find(item =>
+                item.Id == order.CommercialPlanId &&
+                !item.IsDeleted)
+            .FirstOrDefaultAsync();
+
+        if (plan == null)
         {
             return BadRequest(
                 ApiResponse<Sale>.Fail(
-                    "Todas las cantidades deben ser mayores a cero"
+                    "El plan comercial relacionado ya no existe"
                 )
             );
         }
 
-        /*
-         * Primero se validan todos los productos.
-         * Después se realizan los descuentos.
-         */
-        var validatedProducts =
-            new List<(Product Product, int Quantity)>();
-
-        var details = new List<SaleDetail>();
-        decimal total = 0;
-
-        foreach (var item in groupedItems)
-        {
-            var product = await _db.Products
-                .Find(productItem =>
-                    productItem.Id == item.ProductId &&
-                    !productItem.IsDeleted &&
-                    productItem.IsActive)
-                .FirstOrDefaultAsync();
-
-            if (product == null)
-            {
-                return BadRequest(
-                    ApiResponse<Sale>.Fail(
-                        $"Producto no encontrado: {item.ProductId}"
-                    )
-                );
-            }
-
-            if (!product.CanBePurchased ||
-                product.CommercialStatus != "Available")
-            {
-                return BadRequest(
-                    ApiResponse<Sale>.Fail(
-                        $"El producto {product.Name} no está disponible para venta"
-                    )
-                );
-            }
-
-            if (product.FinishedStock < item.Quantity)
-            {
-                return BadRequest(
-                    ApiResponse<Sale>.Fail(
-                        $"Stock insuficiente de {product.Name}. " +
-                        $"Solicitado: {item.Quantity}. " +
-                        $"Disponible: {product.FinishedStock}"
-                    )
-                );
-            }
-
-            var subtotal =
-                product.Price * item.Quantity;
-
-            details.Add(new SaleDetail
-            {
-                ProductId = product.Id,
-                ProductName = product.Name,
-                Quantity = item.Quantity,
-                UnitPrice = product.Price,
-                Subtotal = subtotal
-            });
-
-            validatedProducts.Add(
-                (product, item.Quantity)
-            );
-
-            total += subtotal;
-        }
-
-        /*
-         * Descuento de producto terminado.
-         *
-         * El filtro también comprueba el stock para disminuir
-         * el riesgo de vender unidades que ya fueron tomadas por
-         * otra solicitud.
-         */
-        foreach (var validatedItem in validatedProducts)
-        {
-            var stockUpdate = Builders<Product>.Update
-                .Inc(
-                    product =>
-                        product.FinishedStock,
-                    -validatedItem.Quantity
-                )
-                .Set(
-                    product =>
-                        product.UpdatedAt,
-                    DateTime.UtcNow
-                );
-
-            var stockResult =
-                await _db.Products.UpdateOneAsync(
-                    product =>
-                        product.Id ==
-                            validatedItem.Product.Id &&
-                        !product.IsDeleted &&
-                        product.IsActive &&
-                        product.CanBePurchased &&
-                        product.CommercialStatus ==
-                            "Available" &&
-                        product.FinishedStock >=
-                            validatedItem.Quantity,
-                    stockUpdate
-                );
-
-            if (stockResult.ModifiedCount == 0)
-            {
-                /*
-                 * Esta respuesta cubre el caso en el que otro
-                 * proceso modificó el inventario después de la
-                 * validación inicial.
-                 */
-                return Conflict(
-                    ApiResponse<Sale>.Fail(
-                        $"El inventario de {validatedItem.Product.Name} cambió durante la operación. Intenta nuevamente"
-                    )
-                );
-            }
-        }
+        var now = DateTime.UtcNow;
 
         var sale = new Sale
         {
-            CustomerId = customer.Id,
-            CustomerName = customer.FullName,
-            SaleDate = DateTime.UtcNow,
-            Total = total,
-            Details = details,
-            CreatedAt = DateTime.UtcNow,
-            IsDeleted = false
+            Folio = BuildFolio("SAL", now),
+            OrderId = order.Id,
+            OrderFolio = order.Folio,
+            QuoteId = order.QuoteId,
+            QuoteFolio = order.QuoteFolio,
+            RecipientType = order.RecipientType,
+            CustomerId = order.CustomerId,
+            InstitutionId = order.InstitutionId,
+            RecipientName = order.RecipientName,
+            ContactName = order.ContactName,
+            Email = order.Email,
+            Phone = order.Phone,
+            CommercialPlanId = order.CommercialPlanId,
+            CommercialPlanName = order.CommercialPlanName,
+            CommercialPackageId = order.CommercialPackageId,
+            CommercialPackageName = order.CommercialPackageName,
+            SaleDate = now,
+            Subtotal = order.Subtotal,
+            Discount = order.Discount,
+            Tax = order.Tax,
+            Shipping = order.Shipping,
+            Total = order.Total,
+            Details = order.Details.Select(item =>
+                new SaleDetail
+                {
+                    ProductId = item.ProductId,
+                    ProductName = item.ProductName,
+                    Quantity = item.RequestedQuantity,
+                    UnitPrice = item.UnitPrice,
+                    Subtotal = item.Subtotal
+                }).ToList(),
+            IsDeleted = false,
+            CreatedAt = now,
+            CreatedBy = GetCurrentUserId()
         };
 
-        await _db.Sales.InsertOneAsync(sale);
+        var licenses = new List<License>();
+
+        foreach (var detail in sale.Details)
+        {
+            for (var index = 0; index < detail.Quantity; index++)
+            {
+                licenses.Add(
+                    new License
+                    {
+                        LicenseCode =
+                            GenerateLicenseCode(),
+                        SaleId = sale.Id,
+                        SaleFolio = sale.Folio,
+                        OrderId = order.Id,
+                        OrderFolio = order.Folio,
+                        SaleDetailId = detail.Id,
+                        ProductId = detail.ProductId,
+                        ProductName = detail.ProductName,
+                        CommercialPlanId =
+                            order.CommercialPlanId,
+                        CommercialPlanName =
+                            order.CommercialPlanName,
+                        CommercialPackageId =
+                            order.CommercialPackageId,
+                        CommercialPackageName =
+                            order.CommercialPackageName,
+                        RecipientType =
+                            order.RecipientType,
+                        CustomerId = order.CustomerId,
+                        InstitutionId =
+                            order.InstitutionId,
+                        RecipientName =
+                            order.RecipientName,
+                        Status = "Available",
+                        WarrantyStartDate = now,
+                        WarrantyEndDate =
+                            now.AddMonths(
+                                plan.WarrantyMonths
+                            ),
+                        IsDeleted = false,
+                        CreatedAt = now,
+                        CreatedBy =
+                            GetCurrentUserId()
+                    }
+                );
+            }
+        }
+
+        sale.LicenseIds =
+            licenses.Select(item => item.Id).ToList();
+
+        using var session =
+            await _db.StartSessionAsync();
+
+        session.StartTransaction();
+
+        try
+        {
+            foreach (var detail in order.Details)
+            {
+                var product = await _db.Products
+                    .Find(
+                        session,
+                        item =>
+                            item.Id == detail.ProductId &&
+                            !item.IsDeleted)
+                    .FirstOrDefaultAsync();
+
+                if (product == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Producto no encontrado: {detail.ProductName}"
+                    );
+                }
+
+                var result = await _db.Products
+                    .UpdateOneAsync(
+                        session,
+                        item =>
+                            item.Id == product.Id &&
+                            item.PhysicalStock ==
+                                product.PhysicalStock &&
+                            item.ReservedStock ==
+                                product.ReservedStock &&
+                            item.PhysicalStock >=
+                                detail.RequestedQuantity &&
+                            item.ReservedStock >=
+                                detail.RequestedQuantity,
+                        Builders<Product>.Update
+                            .Inc(
+                                item =>
+                                    item.PhysicalStock,
+                                -detail.RequestedQuantity
+                            )
+                            .Inc(
+                                item =>
+                                    item.ReservedStock,
+                                -detail.RequestedQuantity
+                            )
+                            .Set(
+                                item => item.UpdatedAt,
+                                now
+                            )
+                            .Set(
+                                item => item.UpdatedBy,
+                                GetCurrentUserId()
+                            )
+                    );
+
+                if (result.ModifiedCount != 1)
+                {
+                    throw new InvalidOperationException(
+                        $"El inventario de {product.Name} cambió durante la venta"
+                    );
+                }
+            }
+
+            await _db.Sales.InsertOneAsync(
+                session,
+                sale
+            );
+
+            if (licenses.Count > 0)
+            {
+                await _db.Licenses.InsertManyAsync(
+                    session,
+                    licenses
+                );
+            }
+
+            order.Status = "Sold";
+            order.UpdatedAt = now;
+            order.UpdatedBy = GetCurrentUserId();
+
+            var orderResult =
+                await _db.Orders.ReplaceOneAsync(
+                    session,
+                    item =>
+                        item.Id == order.Id &&
+                        item.Status == "ReadyForSale",
+                    order
+                );
+
+            if (orderResult.ModifiedCount != 1)
+            {
+                throw new InvalidOperationException(
+                    "El pedido cambió durante la venta"
+                );
+            }
+
+            await session.CommitTransactionAsync();
+        }
+        catch (InvalidOperationException exception)
+        {
+            await session.AbortTransactionAsync();
+
+            return Conflict(
+                ApiResponse<Sale>.Fail(
+                    exception.Message
+                )
+            );
+        }
+        catch
+        {
+            await session.AbortTransactionAsync();
+            throw;
+        }
 
         return CreatedAtAction(
             nameof(GetById),
             new { id = sale.Id },
             ApiResponse<Sale>.Ok(
                 sale,
-                "Venta creada e inventario actualizado correctamente"
+                $"Venta creada correctamente. Se generaron {licenses.Count} licencias"
             )
         );
     }
 
-    // =========================================================
-    // DELETE: api/Sales/{id}
-    //
-    // Eliminación lógica. No repone automáticamente existencias,
-    // porque una eliminación administrativa no necesariamente
-    // representa una devolución.
-    // =========================================================
-    [HttpDelete("{id}")]
-    [Authorize(Roles = "Admin")]
-    public async Task<IActionResult> Delete(string id)
+    private static string GenerateLicenseCode()
     {
-        if (string.IsNullOrWhiteSpace(id))
-        {
-            return BadRequest(
-                ApiResponse<string>.Fail(
-                    "El identificador de la venta es obligatorio"
-                )
-            );
-        }
+        return
+            $"VOLTS-{DateTime.UtcNow:yyyyMMdd}-" +
+            Guid.NewGuid()
+                .ToString("N")[..10]
+                .ToUpperInvariant();
+    }
 
-        var sale = await _db.Sales
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+    private static string BuildFolio(
+        string prefix,
+        DateTime now)
+    {
+        return
+            $"{prefix}-{now:yyyyMMdd-HHmmss}-" +
+            Guid.NewGuid()
+                .ToString("N")[..6]
+                .ToUpperInvariant();
+    }
 
-        if (sale == null)
-        {
-            return NotFound(
-                ApiResponse<string>.Fail(
-                    "Venta no encontrada"
-                )
-            );
-        }
-
-        var update = Builders<Sale>.Update
-            .Set(item => item.IsDeleted, true)
-            .Set(item => item.UpdatedAt, DateTime.UtcNow);
-
-        await _db.Sales.UpdateOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            update
-        );
-
-        return Ok(
-            ApiResponse<string>.Ok(
-                "Venta eliminada correctamente"
-            )
+    private string? GetCurrentUserId()
+    {
+        return User.FindFirstValue(
+            ClaimTypes.NameIdentifier
         );
     }
 }

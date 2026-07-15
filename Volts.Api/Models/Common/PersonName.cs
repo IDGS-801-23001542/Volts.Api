@@ -1,11 +1,9 @@
-﻿namespace Volts.Api.Models.Common;
+namespace Volts.Api.Models.Common;
 
 public class PersonName
 {
     public string FirstNames { get; set; } = string.Empty;
-
     public string PaternalLastName { get; set; } = string.Empty;
-
     public string? MaternalLastName { get; set; }
 
     public string FullName
@@ -21,9 +19,9 @@ public class PersonName
 
             return string.Join(
                 " ",
-                parts.Where(value =>
-                    !string.IsNullOrWhiteSpace(value))
-                .Select(value => value!.Trim())
+                parts
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value!.Trim())
             );
         }
     }
