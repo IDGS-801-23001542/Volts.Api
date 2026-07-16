@@ -2,7 +2,8 @@
 
 public class PurchaseCreateDto
 {
-    public string SupplierId { get; set; } = string.Empty;
+    public string SupplierId { get; set; } =
+        string.Empty;
 
     public string? InvoiceNumber { get; set; }
 
@@ -12,14 +13,20 @@ public class PurchaseCreateDto
 
     public decimal ShippingCost { get; set; }
 
-    public string Notes { get; set; } = string.Empty;
+    public string Notes { get; set; } =
+        string.Empty;
 
-    public List<PurchaseDetailDto> Details { get; set; } = new();
+    public List<PurchaseDetailDto> Details
+    {
+        get;
+        set;
+    } = new();
 }
 
 public class PurchaseDetailDto
 {
-    public string RawMaterialId { get; set; } = string.Empty;
+    public string RawMaterialId { get; set; } =
+        string.Empty;
 
     public decimal Quantity { get; set; }
 
@@ -34,9 +41,17 @@ public class PurchaseSummaryDto
 
     public decimal TotalInvested { get; set; }
 
-    public decimal InvestedThisMonth { get; set; }
+    public decimal InvestedThisMonth
+    {
+        get;
+        set;
+    }
 
-    public decimal AveragePurchaseValue { get; set; }
+    public decimal AveragePurchaseValue
+    {
+        get;
+        set;
+    }
 
     public int SuppliersUsed { get; set; }
 }

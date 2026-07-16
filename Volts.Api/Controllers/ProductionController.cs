@@ -1,9 +1,10 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using Volts.Api.DTOs;
 using Volts.Api.Models;
+using Volts.Api.Models.Enums;
 using Volts.Api.Responses;
 using Volts.Api.Services;
 
@@ -14,35 +15,17 @@ namespace Volts.Api.Controllers;
 [Authorize(Roles = "Admin,Employee")]
 public class ProductionController : ControllerBase
 {
-    private static readonly string[] WasteClassifications =
-    {
-        "Reusable",
-        "Recyclable",
-        "Sellable",
-        "Rework",
-        "FinalWaste"
-    };
-
-    private static readonly string[] WasteDestinations =
-    {
-        "Pending",
-        "Reuse",
-        "Sell",
-        "Recycle",
-        "Repair",
-        "Discard"
-    };
-
     private readonly MongoDbService _db;
+    private readonly InventoryService _inventory;
 
-    public ProductionController(MongoDbService db)
+    public ProductionController(
+        MongoDbService db,
+        InventoryService inventory)
     {
         _db = db;
+        _inventory = inventory;
     }
 
-    // =========================================================
-    // GET: api/Production
-    // =========================================================
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
@@ -59,12 +42,18 @@ public class ProductionController : ControllerBase
         );
     }
 
-    // =========================================================
-    // GET: api/Production/{id}
-    // =========================================================
     [HttpGet("{id}")]
     public async Task<IActionResult> GetById(string id)
     {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return BadRequest(
+                ApiResponse<ProductionOrder>.Fail(
+                    "El identificador de la orden es obligatorio"
+                )
+            );
+        }
+
         var order = await _db.ProductionOrders
             .Find(item =>
                 item.Id == id &&
@@ -75,7 +64,7 @@ public class ProductionController : ControllerBase
         {
             return NotFound(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Orden de producción no encontrada"
+                    "Orden no encontrada"
                 )
             );
         }
@@ -88,14 +77,26 @@ public class ProductionController : ControllerBase
         );
     }
 
-    // =========================================================
-    // POST: api/Production
-    // Crea la orden sin descontar inventario.
-    // =========================================================
     [HttpPost]
     public async Task<IActionResult> Create(
         [FromBody] ProductionCreateDto dto)
     {
+        var quantityError =
+            QuantityValidationService
+                .ValidateWholeQuantity(
+                    dto.Quantity,
+                    "La cantidad"
+                );
+
+        if (quantityError != null)
+        {
+            return BadRequest(
+                ApiResponse<ProductionOrder>.Fail(
+                    quantityError
+                )
+            );
+        }
+
         if (string.IsNullOrWhiteSpace(dto.ProductId))
         {
             return BadRequest(
@@ -105,20 +106,13 @@ public class ProductionController : ControllerBase
             );
         }
 
-        if (dto.Quantity <= 0)
-        {
-            return BadRequest(
-                ApiResponse<ProductionOrder>.Fail(
-                    "La cantidad debe ser mayor a cero"
-                )
-            );
-        }
+        var notes = dto.Notes?.Trim() ?? string.Empty;
 
-        if (dto.Notes.Trim().Length > 1000)
+        if (notes.Length > 1000)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Las observaciones no pueden superar los 1000 caracteres"
+                    "Las notas no pueden superar 1000 caracteres"
                 )
             );
         }
@@ -126,32 +120,15 @@ public class ProductionController : ControllerBase
         var product = await _db.Products
             .Find(item =>
                 item.Id == dto.ProductId &&
-                !item.IsDeleted)
+                !item.IsDeleted &&
+                item.IsActive)
             .FirstOrDefaultAsync();
 
-        if (product == null)
+        if (product == null || !product.CanBeProduced)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Producto no encontrado"
-                )
-            );
-        }
-
-        if (!product.IsActive)
-        {
-            return BadRequest(
-                ApiResponse<ProductionOrder>.Fail(
-                    "El producto está inactivo"
-                )
-            );
-        }
-
-        if (!product.CanBeProduced)
-        {
-            return BadRequest(
-                ApiResponse<ProductionOrder>.Fail(
-                    "El producto no está habilitado para producción"
+                    "Producto inexistente, inactivo o no producible"
                 )
             );
         }
@@ -160,7 +137,7 @@ public class ProductionController : ControllerBase
             .Find(item =>
                 item.ProductId == dto.ProductId &&
                 !item.IsDeleted &&
-                item.IsActive)
+                item.Status == RecipeStatus.Active)
             .SortByDescending(item => item.Version)
             .FirstOrDefaultAsync();
 
@@ -168,116 +145,164 @@ public class ProductionController : ControllerBase
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "El producto no tiene una receta activa"
+                    "El producto no tiene receta activa"
                 )
             );
         }
 
-        var materials =
+        var productionMaterials =
             new List<ProductionMaterial>();
+
+        var shortages =
+            new List<ProductionShortage>();
 
         foreach (var detail in recipe.Details)
         {
-            var quantityWithWaste =
-                detail.QuantityRequired *
-                (
-                    1 +
-                    detail.WastePercentage / 100
+            var material = await _db.RawMaterials
+                .Find(item =>
+                    item.Id == detail.RawMaterialId &&
+                    !item.IsDeleted &&
+                    item.IsActive)
+                .FirstOrDefaultAsync();
+
+            if (material == null)
+            {
+                return BadRequest(
+                    ApiResponse<ProductionOrder>.Fail(
+                        $"El material {detail.RawMaterialName} no está disponible"
+                    )
                 );
+            }
 
-            var required =
-                quantityWithWaste *
-                dto.Quantity;
+            var requiredQuantity = decimal.Round(
+                detail.TotalQuantityPerUnit * dto.Quantity,
+                material.UnitDecimalPlaces,
+                MidpointRounding.AwayFromZero
+            );
 
-            materials.Add(
+            if (!material.UnitAllowsDecimals &&
+                decimal.Truncate(requiredQuantity) !=
+                requiredQuantity)
+            {
+                return BadRequest(
+                    ApiResponse<ProductionOrder>.Fail(
+                        $"La receta genera una cantidad fraccionaria inválida de {material.Name}"
+                    )
+                );
+            }
+
+            productionMaterials.Add(
                 new ProductionMaterial
                 {
-                    RawMaterialId =
-                        detail.RawMaterialId,
-
-                    RawMaterialCode =
-                        detail.RawMaterialCode,
-
-                    RawMaterialName =
-                        detail.RawMaterialName,
-
-                    Unit = detail.Unit,
-
+                    RawMaterialId = material.Id,
+                    RawMaterialCode = material.Code,
+                    RawMaterialName = material.Name,
+                    UnitOfMeasureId =
+                        material.UnitOfMeasureId,
+                    UnitCode = material.UnitCode,
+                    UnitName = material.UnitName,
+                    UnitSymbol = material.UnitSymbol,
+                    UnitAllowsDecimals =
+                        material.UnitAllowsDecimals,
+                    UnitDecimalPlaces =
+                        material.UnitDecimalPlaces,
+                    Unit = material.UnitSymbol,
                     QuantityPerUnit =
                         detail.QuantityRequired,
-
                     WastePercentage =
                         detail.WastePercentage,
-
-                    RequiredQuantity = required,
-
-                    IssuedQuantity = 0,
-
-                    UnitCost =
-                        detail.EstimatedUnitCost,
-
+                    RequiredQuantity = requiredQuantity,
+                    UnitCost = material.AverageCost,
                     TotalCost =
-                        required *
-                        detail.EstimatedUnitCost
+                        InventoryRoundingService
+                            .RoundEstimatedCost(
+                                requiredQuantity *
+                                material.AverageCost
+                            )
                 }
             );
+
+            if (material.CurrentStock < requiredQuantity)
+            {
+                shortages.Add(
+                    new ProductionShortage
+                    {
+                        RawMaterialId = material.Id,
+                        RawMaterialName = material.Name,
+                        UnitSymbol = material.UnitSymbol,
+                        RequiredQuantity =
+                            requiredQuantity,
+                        AvailableQuantity =
+                            material.CurrentStock,
+                        MissingQuantity =
+                            requiredQuantity -
+                            material.CurrentStock
+                    }
+                );
+            }
         }
 
         var now = DateTime.UtcNow;
 
-        var folio =
-            await GenerateFolioAsync(now);
-
-        var production = new ProductionOrder
+        var order = new ProductionOrder
         {
-            Folio = folio,
+            Folio =
+                $"PRD-{now:yyyyMMdd-HHmmss}-" +
+                Guid.NewGuid()
+                    .ToString("N")[..6]
+                    .ToUpperInvariant(),
 
             ProductId = product.Id,
             ProductName = product.Name,
-
             RecipeId = recipe.Id,
             RecipeCode = recipe.Code,
             RecipeVersion = recipe.Version,
-
             QuantityPlanned = dto.Quantity,
-            QuantityCompleted = 0,
-            QuantityDefective = 0,
-
-            Status = "Created",
-
-            Materials = materials,
+            Status = ProductionStatus.Created,
+            Materials = productionMaterials,
+            Shortages = shortages,
+            HasShortages = shortages.Count > 0,
 
             EstimatedMaterialCost =
-                materials.Sum(
-                    item => item.TotalCost
-                ),
+                InventoryRoundingService
+                    .RoundEstimatedCost(
+                        productionMaterials.Sum(
+                            item => item.TotalCost
+                        )
+                    ),
 
-            ActualMaterialCost = 0,
+            SourceOrderId =
+                string.IsNullOrWhiteSpace(
+                    dto.SourceOrderId)
+                    ? null
+                    : dto.SourceOrderId.Trim(),
 
-            Notes = dto.Notes.Trim(),
-
+            Notes = notes,
             IsDeleted = false,
             CreatedAt = now,
             CreatedBy = GetCurrentUserId()
         };
 
         await _db.ProductionOrders
-            .InsertOneAsync(production);
+            .InsertOneAsync(order);
+
+        var message = order.HasShortages
+            ? "Orden creada con faltantes de material"
+            : "Orden creada y lista para iniciar";
 
         return CreatedAtAction(
             nameof(GetById),
-            new { id = production.Id },
+            new
+            {
+                id = order.Id
+            },
             ApiResponse<ProductionOrder>.Ok(
-                production,
-                "Orden de producción creada correctamente"
+                order,
+                message
             )
         );
     }
 
-    // =========================================================
-    // POST: api/Production/{id}/start
-    // Descuenta la materia prima.
-    // =========================================================
     [HttpPost("{id}/start")]
     public async Task<IActionResult> Start(string id)
     {
@@ -291,12 +316,12 @@ public class ProductionController : ControllerBase
         {
             return NotFound(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Orden de producción no encontrada"
+                    "Orden no encontrada"
                 )
             );
         }
 
-        if (order.Status != "Created")
+        if (order.Status != ProductionStatus.Created)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
@@ -308,167 +333,171 @@ public class ProductionController : ControllerBase
         var loadedMaterials =
             new Dictionary<string, RawMaterial>();
 
-        foreach (var requiredMaterial in order.Materials)
+        var shortages =
+            new List<ProductionShortage>();
+
+        foreach (var line in order.Materials)
         {
             var material = await _db.RawMaterials
                 .Find(item =>
-                    item.Id ==
-                        requiredMaterial.RawMaterialId &&
-                    !item.IsDeleted)
+                    item.Id == line.RawMaterialId &&
+                    !item.IsDeleted &&
+                    item.IsActive)
                 .FirstOrDefaultAsync();
 
             if (material == null)
             {
                 return BadRequest(
                     ApiResponse<ProductionOrder>.Fail(
-                        $"Materia prima no encontrada: {requiredMaterial.RawMaterialName}"
-                    )
-                );
-            }
-
-            if (!material.IsActive)
-            {
-                return BadRequest(
-                    ApiResponse<ProductionOrder>.Fail(
-                        $"La materia prima {material.Name} está inactiva"
-                    )
-                );
-            }
-
-            if (material.CurrentStock <
-                requiredMaterial.RequiredQuantity)
-            {
-                return BadRequest(
-                    ApiResponse<ProductionOrder>.Fail(
-                        $"Stock insuficiente de {material.Name}. " +
-                        $"Requerido: {requiredMaterial.RequiredQuantity} " +
-                        $"{material.Unit}. Disponible: " +
-                        $"{material.CurrentStock} {material.Unit}"
+                        $"Material no disponible: {line.RawMaterialName}"
                     )
                 );
             }
 
             loadedMaterials[material.Id] = material;
+
+            if (material.CurrentStock <
+                line.RequiredQuantity)
+            {
+                shortages.Add(
+                    new ProductionShortage
+                    {
+                        RawMaterialId = material.Id,
+                        RawMaterialName = material.Name,
+                        UnitSymbol = material.UnitSymbol,
+                        RequiredQuantity =
+                            line.RequiredQuantity,
+                        AvailableQuantity =
+                            material.CurrentStock,
+                        MissingQuantity =
+                            line.RequiredQuantity -
+                            material.CurrentStock
+                    }
+                );
+            }
         }
 
-        decimal actualCost = 0;
-
-        foreach (var productionMaterial in order.Materials)
+        if (shortages.Count > 0)
         {
-            var material =
-                loadedMaterials[
-                    productionMaterial.RawMaterialId
-                ];
+            order.Shortages = shortages;
+            order.HasShortages = true;
+            order.UpdatedAt = DateTime.UtcNow;
+            order.UpdatedBy = GetCurrentUserId();
 
-            var previousStock =
-                material.CurrentStock;
+            await _db.ProductionOrders
+                .ReplaceOneAsync(
+                    item => item.Id == order.Id,
+                    order
+                );
 
-            var newStock =
-                previousStock -
-                productionMaterial.RequiredQuantity;
+            return BadRequest(
+                ApiResponse<ProductionOrder>.Fail(
+                    "No hay stock suficiente para iniciar la orden"
+                )
+            );
+        }
 
-            productionMaterial.IssuedQuantity =
-                productionMaterial.RequiredQuantity;
+        using var session =
+            await _db.StartSessionAsync();
 
-            productionMaterial.UnitCost =
-                material.AverageCost;
+        session.StartTransaction();
 
-            productionMaterial.TotalCost =
-                productionMaterial.IssuedQuantity *
-                material.AverageCost;
+        try
+        {
+            decimal actualCost = 0;
 
-            actualCost +=
-                productionMaterial.TotalCost;
+            foreach (var line in order.Materials)
+            {
+                var material =
+                    loadedMaterials[line.RawMaterialId];
 
-            var update =
-                Builders<RawMaterial>.Update
-                    .Set(
-                        item => item.CurrentStock,
-                        newStock
-                    )
-                    .Set(
-                        item => item.UpdatedAt,
-                        DateTime.UtcNow
-                    )
-                    .Set(
-                        item => item.UpdatedBy,
-                        GetCurrentUserId()
+                line.IssuedQuantity =
+                    line.RequiredQuantity;
+
+                line.UnitCost =
+                    material.AverageCost;
+
+                line.TotalCost =
+                    InventoryRoundingService
+                        .RoundEstimatedCost(
+                            line.IssuedQuantity *
+                            line.UnitCost
+                        );
+
+                actualCost += line.TotalCost;
+
+                await _inventory.IssueRawMaterialAsync(
+                    session,
+                    material,
+                    line.IssuedQuantity,
+                    "ProductionIssue",
+                    $"Salida para producción {order.Folio}",
+                    "Production",
+                    order.Id,
+                    GetCurrentUserId()
+                );
+            }
+
+            order.Status =
+                ProductionStatus.InProgress;
+
+            order.StartedAt =
+                DateTime.UtcNow;
+
+            order.HasShortages = false;
+            order.Shortages.Clear();
+
+            order.ActualMaterialCost =
+                InventoryRoundingService
+                    .RoundEstimatedCost(actualCost);
+
+            order.UpdatedAt = DateTime.UtcNow;
+            order.UpdatedBy = GetCurrentUserId();
+
+            var updateResult =
+                await _db.ProductionOrders
+                    .ReplaceOneAsync(
+                        session,
+                        item =>
+                            item.Id == order.Id &&
+                            item.Status ==
+                                ProductionStatus.Created,
+                        order
                     );
 
-            await _db.RawMaterials.UpdateOneAsync(
-                item =>
-                    item.Id == material.Id &&
-                    !item.IsDeleted,
-                update
+            if (updateResult.ModifiedCount != 1)
+            {
+                throw new InvalidOperationException(
+                    "La orden cambió mientras se intentaba iniciar"
+                );
+            }
+
+            await session.CommitTransactionAsync();
+
+            return Ok(
+                ApiResponse<ProductionOrder>.Ok(
+                    order,
+                    "Producción iniciada e inventario descontado correctamente"
+                )
             );
-
-            var movement =
-                new RawMaterialMovement
-                {
-                    RawMaterialId = material.Id,
-                    RawMaterialCode = material.Code,
-                    RawMaterialName = material.Name,
-
-                    MovementType = "Production",
-
-                    Quantity =
-                        productionMaterial.RequiredQuantity,
-
-                    PreviousStock = previousStock,
-                    NewStock = newStock,
-
-                    Unit = material.Unit,
-
-                    Reason =
-                        $"Salida para producción {order.Folio}",
-
-                    ReferenceType = "Production",
-
-                    ReferenceId = order.Id,
-
-                    UnitCost = material.AverageCost,
-
-                    TotalCost =
-                        productionMaterial.TotalCost,
-
-                    MovementDate = DateTime.UtcNow,
-
-                    CreatedAt = DateTime.UtcNow,
-
-                    CreatedBy = GetCurrentUserId(),
-
-                    IsDeleted = false
-                };
-
-            await _db.RawMaterialMovements
-                .InsertOneAsync(movement);
         }
+        catch (InvalidOperationException exception)
+        {
+            await session.AbortTransactionAsync();
 
-        order.Status = "InProgress";
-        order.StartedAt = DateTime.UtcNow;
-        order.ActualMaterialCost = actualCost;
-        order.UpdatedAt = DateTime.UtcNow;
-        order.UpdatedBy = GetCurrentUserId();
-
-        await _db.ProductionOrders.ReplaceOneAsync(
-            item =>
-                item.Id == order.Id &&
-                !item.IsDeleted,
-            order
-        );
-
-        return Ok(
-            ApiResponse<ProductionOrder>.Ok(
-                order,
-                "Producción iniciada y materia prima descontada correctamente"
-            )
-        );
+            return Conflict(
+                ApiResponse<ProductionOrder>.Fail(
+                    exception.Message
+                )
+            );
+        }
+        catch
+        {
+            await session.AbortTransactionAsync();
+            throw;
+        }
     }
 
-    // =========================================================
-    // POST: api/Production/{id}/complete
-    // Aumenta producto terminado y registra merma.
-    // =========================================================
     [HttpPost("{id}/complete")]
     public async Task<IActionResult> Complete(
         string id,
@@ -484,12 +513,13 @@ public class ProductionController : ControllerBase
         {
             return NotFound(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Orden de producción no encontrada"
+                    "Orden no encontrada"
                 )
             );
         }
 
-        if (order.Status != "InProgress")
+        if (order.Status !=
+            ProductionStatus.InProgress)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
@@ -498,25 +528,47 @@ public class ProductionController : ControllerBase
             );
         }
 
-        if (dto.QuantityCompleted < 0 ||
-            dto.QuantityDefective < 0)
+        var goodQuantityError =
+            QuantityValidationService
+                .ValidateWholeQuantity(
+                    dto.QuantityCompleted,
+                    "Las unidades buenas",
+                    positiveRequired: false
+                );
+
+        if (goodQuantityError != null)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Las cantidades no pueden ser negativas"
+                    goodQuantityError
                 )
             );
         }
 
-        if (
-            dto.QuantityCompleted +
-            dto.QuantityDefective !=
-            order.QuantityPlanned
-        )
+        var defectiveQuantityError =
+            QuantityValidationService
+                .ValidateWholeQuantity(
+                    dto.QuantityDefective,
+                    "Las unidades defectuosas",
+                    positiveRequired: false
+                );
+
+        if (defectiveQuantityError != null)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "La suma de productos terminados y defectuosos debe ser igual a la cantidad planeada"
+                    defectiveQuantityError
+                )
+            );
+        }
+
+        if (dto.QuantityCompleted +
+            dto.QuantityDefective !=
+            order.QuantityPlanned)
+        {
+            return BadRequest(
+                ApiResponse<ProductionOrder>.Fail(
+                    "Buenas + defectuosas debe ser igual a la cantidad planeada"
                 )
             );
         }
@@ -531,164 +583,196 @@ public class ProductionController : ControllerBase
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "El producto asociado ya no existe"
+                    "El producto asociado no existe"
                 )
             );
         }
 
-        var wasteValidation =
-            await ValidateProductionWastesAsync(
+        var wasteInputs =
+            dto.Wastes ?? new List<ProductionWasteDto>();
+
+        var wasteError =
+            ValidateWastes(
                 order,
-                dto.Wastes
+                wasteInputs
             );
 
-        if (wasteValidation != null)
+        if (wasteError != null)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    wasteValidation
+                    wasteError
                 )
             );
         }
 
-        var productUpdate =
-            Builders<Product>.Update
-                .Inc(
-                    item => item.FinishedStock,
-                    dto.QuantityCompleted
-                )
-                .Set(
-                    item => item.UpdatedAt,
-                    DateTime.UtcNow
-                );
+        using var session =
+            await _db.StartSessionAsync();
 
-        await _db.Products.UpdateOneAsync(
-            item =>
-                item.Id == product.Id &&
-                !item.IsDeleted,
-            productUpdate
-        );
+        session.StartTransaction();
 
-        foreach (var inputWaste in dto.Wastes)
+        try
         {
-            var productionMaterial =
-                order.Materials.First(
-                    item =>
-                        item.RawMaterialId ==
-                        inputWaste.RawMaterialId
-                );
+            await _inventory.AddFinishedProductAsync(
+                session,
+                product,
+                dto.QuantityCompleted,
+                GetCurrentUserId()
+            );
 
-            var waste = new Waste
+            foreach (var input in wasteInputs)
             {
-                RawMaterialId =
-                    productionMaterial.RawMaterialId,
+                var line = order.Materials
+                    .First(item =>
+                        item.RawMaterialId ==
+                        input.RawMaterialId
+                    );
 
-                RawMaterialCode =
-                    productionMaterial.RawMaterialCode,
+                var wasteNotes =
+                    input.Notes?.Trim() ?? string.Empty;
 
-                RawMaterialName =
-                    productionMaterial.RawMaterialName,
+                var waste = new Waste
+                {
+                    RawMaterialId = line.RawMaterialId,
+                    RawMaterialCode = line.RawMaterialCode,
+                    RawMaterialName = line.RawMaterialName,
+                    UnitOfMeasureId = line.UnitOfMeasureId,
+                    UnitCode = line.UnitCode,
+                    UnitName = line.UnitName,
+                    UnitSymbol = line.UnitSymbol,
+                    UnitAllowsDecimals =
+                        line.UnitAllowsDecimals,
+                    UnitDecimalPlaces =
+                        line.UnitDecimalPlaces,
+                    Unit = line.UnitSymbol,
+                    ProductionOrderId = order.Id,
+                    ProductionFolio = order.Folio,
+                    QuantityGenerated = input.Quantity,
+                    AvailableQuantity = input.Quantity,
+                    Classification = input.Classification,
+                    Destination = input.Destination,
+                    Status = WasteStatus.Available,
+                    UnitCost = line.UnitCost,
 
-                Unit = productionMaterial.Unit,
+                    EstimatedCost =
+                        InventoryRoundingService
+                            .RoundEstimatedCost(
+                                input.Quantity *
+                                line.UnitCost
+                            ),
 
-                ProductionOrderId = order.Id,
+                    EstimatedRecoveryValue =
+                        InventoryRoundingService
+                            .RoundMoney(
+                                input.EstimatedRecoveryValue
+                            ),
 
-                ProductionFolio = order.Folio,
+                    Reason =
+                        $"Merma generada en {order.Folio}",
 
-                QuantityGenerated =
-                    inputWaste.Quantity,
+                    Notes = wasteNotes,
+                    WasteDate = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow,
+                    CreatedBy = GetCurrentUserId(),
+                    IsDeleted = false
+                };
 
-                AvailableQuantity =
-                    inputWaste.Quantity,
+                await _db.Wastes.InsertOneAsync(
+                    session,
+                    waste
+                );
+            }
 
-                Classification =
-                    inputWaste.Classification,
+            order.QuantityCompleted =
+                dto.QuantityCompleted;
 
-                Destination =
-                    inputWaste.Destination,
+            order.QuantityDefective =
+                dto.QuantityDefective;
 
-                Status =
-                    inputWaste.Quantity > 0
-                        ? "Available"
-                        : "Consumed",
+            order.Status =
+                ProductionStatus.Completed;
 
-                UnitCost =
-                    productionMaterial.UnitCost,
+            order.CompletedAt =
+                DateTime.UtcNow;
 
-                EstimatedCost =
-                    inputWaste.Quantity *
-                    productionMaterial.UnitCost,
+            var completionNotes =
+                dto.Notes?.Trim() ?? string.Empty;
 
-                EstimatedRecoveryValue =
-                    inputWaste.EstimatedRecoveryValue,
+            if (!string.IsNullOrWhiteSpace(
+                    completionNotes))
+            {
+                order.Notes = completionNotes;
+            }
 
-                RecoveredValue = 0,
+            order.UpdatedAt = DateTime.UtcNow;
+            order.UpdatedBy = GetCurrentUserId();
 
-                Reason =
-                    $"Merma generada en producción {order.Folio}",
+            var updateResult =
+                await _db.ProductionOrders
+                    .ReplaceOneAsync(
+                        session,
+                        item =>
+                            item.Id == order.Id &&
+                            item.Status ==
+                                ProductionStatus.InProgress,
+                        order
+                    );
 
-                Notes = inputWaste.Notes.Trim(),
+            if (updateResult.ModifiedCount != 1)
+            {
+                throw new InvalidOperationException(
+                    "La orden cambió mientras se intentaba completar"
+                );
+            }
 
-                WasteDate = DateTime.UtcNow,
+            await session.CommitTransactionAsync();
 
-                CreatedAt = DateTime.UtcNow,
-
-                CreatedBy = GetCurrentUserId(),
-
-                IsDeleted = false
-            };
-
-            await _db.Wastes.InsertOneAsync(waste);
+            return Ok(
+                ApiResponse<ProductionOrder>.Ok(
+                    order,
+                    "Producción completada correctamente"
+                )
+            );
         }
+        catch (InvalidOperationException exception)
+        {
+            await session.AbortTransactionAsync();
 
-        order.QuantityCompleted =
-            dto.QuantityCompleted;
-
-        order.QuantityDefective =
-            dto.QuantityDefective;
-
-        order.Status = "Completed";
-
-        order.CompletedAt = DateTime.UtcNow;
-
-        order.Notes = string.IsNullOrWhiteSpace(
-            dto.Notes)
-                ? order.Notes
-                : dto.Notes.Trim();
-
-        order.UpdatedAt = DateTime.UtcNow;
-
-        order.UpdatedBy = GetCurrentUserId();
-
-        await _db.ProductionOrders.ReplaceOneAsync(
-            item =>
-                item.Id == order.Id &&
-                !item.IsDeleted,
-            order
-        );
-
-        return Ok(
-            ApiResponse<ProductionOrder>.Ok(
-                order,
-                "Producción completada, producto terminado actualizado y merma registrada correctamente"
-            )
-        );
+            return Conflict(
+                ApiResponse<ProductionOrder>.Fail(
+                    exception.Message
+                )
+            );
+        }
+        catch
+        {
+            await session.AbortTransactionAsync();
+            throw;
+        }
     }
 
-    // =========================================================
-    // POST: api/Production/{id}/cancel
-    // Solo se permite cancelar antes de iniciar.
-    // =========================================================
     [HttpPost("{id}/cancel")]
     public async Task<IActionResult> Cancel(
         string id,
         [FromBody] ProductionCancelDto dto)
     {
-        if (string.IsNullOrWhiteSpace(dto.Reason))
+        var reason =
+            dto.Reason?.Trim() ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(reason))
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Debes indicar el motivo de cancelación"
+                    "Indica el motivo"
+                )
+            );
+        }
+
+        if (reason.Length > 500)
+        {
+            return BadRequest(
+                ApiResponse<ProductionOrder>.Fail(
+                    "El motivo no puede superar 500 caracteres"
                 )
             );
         }
@@ -703,142 +787,137 @@ public class ProductionController : ControllerBase
         {
             return NotFound(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Orden de producción no encontrada"
+                    "Orden no encontrada"
                 )
             );
         }
 
-        if (order.Status != "Created")
+        if (order.Status != ProductionStatus.Created)
         {
             return BadRequest(
                 ApiResponse<ProductionOrder>.Fail(
-                    "Solo pueden cancelarse órdenes que todavía no han iniciado"
+                    "Solo puede cancelarse antes de iniciar"
                 )
             );
         }
 
-        order.Status = "Cancelled";
+        order.Status = ProductionStatus.Cancelled;
         order.CancelledAt = DateTime.UtcNow;
+
+        var cancellationNote =
+            $"Cancelación: {reason}";
+
         order.Notes =
-            $"{order.Notes}\nCancelación: {dto.Reason.Trim()}"
-                .Trim();
+            string.IsNullOrWhiteSpace(order.Notes)
+                ? cancellationNote
+                : $"{order.Notes}{Environment.NewLine}{cancellationNote}";
 
         order.UpdatedAt = DateTime.UtcNow;
         order.UpdatedBy = GetCurrentUserId();
 
-        await _db.ProductionOrders.ReplaceOneAsync(
-            item => item.Id == order.Id,
-            order
-        );
+        var result = await _db.ProductionOrders
+            .ReplaceOneAsync(
+                item =>
+                    item.Id == order.Id &&
+                    item.Status ==
+                        ProductionStatus.Created,
+                order
+            );
+
+        if (result.ModifiedCount != 1)
+        {
+            return Conflict(
+                ApiResponse<ProductionOrder>.Fail(
+                    "La orden cambió mientras se intentaba cancelar"
+                )
+            );
+        }
 
         return Ok(
             ApiResponse<ProductionOrder>.Ok(
                 order,
-                "Orden de producción cancelada correctamente"
+                "Orden cancelada correctamente"
             )
         );
     }
 
-    private async Task<string?>
-        ValidateProductionWastesAsync(
-            ProductionOrder order,
-            IEnumerable<ProductionWasteDto> wastes)
+    private static string? ValidateWastes(
+        ProductionOrder order,
+        IEnumerable<ProductionWasteDto> inputs)
     {
-        foreach (var waste in wastes)
+        foreach (var group in inputs.GroupBy(
+                     item => item.RawMaterialId))
         {
-            if (waste.Quantity <= 0)
+            if (string.IsNullOrWhiteSpace(group.Key))
             {
-                return "Todas las cantidades de merma deben ser mayores a cero";
+                return "Todas las mermas deben indicar una materia prima";
             }
 
-            if (!WasteClassifications.Contains(
-                waste.Classification))
-            {
-                return "La clasificación de una merma no es válida";
-            }
-
-            if (!WasteDestinations.Contains(
-                waste.Destination))
-            {
-                return "El destino de una merma no es válido";
-            }
-
-            if (waste.EstimatedRecoveryValue < 0)
-            {
-                return "El valor estimado de recuperación no puede ser negativo";
-            }
-
-            var productionMaterial =
-                order.Materials.FirstOrDefault(
-                    item =>
-                        item.RawMaterialId ==
-                        waste.RawMaterialId
+            var line = order.Materials
+                .FirstOrDefault(item =>
+                    item.RawMaterialId == group.Key
                 );
 
-            if (productionMaterial == null)
+            if (line == null)
             {
-                return "La merma contiene una materia prima que no pertenece a la producción";
+                return "La merma contiene un material ajeno a la orden";
             }
 
-            var totalWasteForMaterial =
-                wastes
-                    .Where(item =>
-                        item.RawMaterialId ==
-                        waste.RawMaterialId)
-                    .Sum(item => item.Quantity);
+            var unit = new UnitOfMeasure
+            {
+                Symbol = line.UnitSymbol,
+                SingularName = line.UnitName,
+                AllowsDecimals =
+                    line.UnitAllowsDecimals,
+                DecimalPlaces =
+                    line.UnitDecimalPlaces
+            };
 
-            if (
-                totalWasteForMaterial >
-                productionMaterial.IssuedQuantity
-            )
+            foreach (var input in group)
+            {
+                var quantityError =
+                    QuantityValidationService
+                        .ValidateQuantity(
+                            input.Quantity,
+                            unit,
+                            $"La merma de {line.RawMaterialName}"
+                        );
+
+                if (quantityError != null)
+                {
+                    return quantityError;
+                }
+
+                var recoveryError =
+                    QuantityValidationService
+                        .ValidateCost(
+                            input.EstimatedRecoveryValue,
+                            "El valor recuperable"
+                        );
+
+                if (recoveryError != null)
+                {
+                    return recoveryError;
+                }
+
+                var notes =
+                    input.Notes?.Trim() ?? string.Empty;
+
+                if (notes.Length > 500)
+                {
+                    return "Las notas de merma no pueden superar 500 caracteres";
+                }
+            }
+
+            if (group.Sum(item => item.Quantity) >
+                line.IssuedQuantity)
             {
                 return
-                    $"La merma de {productionMaterial.RawMaterialName} " +
-                    "no puede ser mayor a la cantidad entregada a producción";
+                    $"La merma de {line.RawMaterialName} supera lo entregado a producción";
             }
         }
 
-        await Task.CompletedTask;
-
         return null;
-    }
-
-    private async Task<string> GenerateFolioAsync(
-        DateTime date)
-    {
-        var prefix =
-            $"PRD-{date:yyyyMMdd}";
-
-        var start = date.Date;
-        var end = start.AddDays(1);
-
-        var count =
-            await _db.ProductionOrders
-                .CountDocumentsAsync(
-                    item =>
-                        item.CreatedAt >= start &&
-                        item.CreatedAt < end
-                );
-
-        var consecutive = count + 1;
-
-        string folio;
-
-        do
-        {
-            folio =
-                $"{prefix}-{consecutive:0000}";
-
-            consecutive++;
-        }
-        while (
-            await _db.ProductionOrders
-                .Find(item =>
-                    item.Folio == folio)
-                .AnyAsync()
-        );
-
-        return folio;
     }
 
     private string? GetCurrentUserId()

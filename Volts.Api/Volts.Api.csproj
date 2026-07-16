@@ -19,7 +19,6 @@
 
   <ItemGroup>
     <Folder Include="Helpers\" />
-    <Folder Include="Middlewares\" />
     <Folder Include="Security\" />
     <Folder Include="Validators\" />
   </ItemGroup>
