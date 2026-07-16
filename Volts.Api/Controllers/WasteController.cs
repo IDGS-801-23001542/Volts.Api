@@ -1,9 +1,10 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using Volts.Api.DTOs;
 using Volts.Api.Models;
+using Volts.Api.Models.Enums;
 using Volts.Api.Responses;
 using Volts.Api.Services;
 
@@ -14,424 +15,110 @@ namespace Volts.Api.Controllers;
 [Authorize(Roles = "Admin,Employee")]
 public class WasteController : ControllerBase
 {
-    private static readonly string[] AllowedClassifications =
-    {
-        "Reusable",
-        "Recyclable",
-        "Sellable",
-        "Rework",
-        "FinalWaste"
-    };
-
-    private static readonly string[] AllowedDestinations =
-    {
-        "Pending",
-        "Reuse",
-        "Sell",
-        "Recycle",
-        "Repair",
-        "Discard"
-    };
-
-    private static readonly string[] AllowedActions =
-    {
-        "Reuse",
-        "Sell",
-        "Recycle",
-        "Repair",
-        "Discard"
-    };
-
     private readonly MongoDbService _db;
+    private readonly InventoryService _inventory;
+    public WasteController(MongoDbService db, InventoryService inventory) { _db = db; _inventory = inventory; }
 
-    public WasteController(MongoDbService db)
-    {
-        _db = db;
-    }
-
-    // =========================================================
-    // GET: api/Waste
-    // =========================================================
     [HttpGet]
-    public async Task<IActionResult> GetAll()
-    {
-        var wastes = await _db.Wastes
-            .Find(waste => !waste.IsDeleted)
-            .SortByDescending(waste => waste.WasteDate)
-            .ToListAsync();
+    public async Task<IActionResult> GetAll() => Ok(ApiResponse<List<Waste>>.Ok(
+        await _db.Wastes.Find(x => !x.IsDeleted).SortByDescending(x => x.WasteDate).ToListAsync(),
+        "Registros de merma obtenidos correctamente"));
 
-        return Ok(
-            ApiResponse<List<Waste>>.Ok(
-                wastes,
-                "Registros de merma obtenidos correctamente"
-            )
-        );
-    }
-
-    // =========================================================
-    // GET: api/Waste/summary
-    // =========================================================
     [HttpGet("summary")]
     public async Task<IActionResult> GetSummary()
     {
-        var wastes = await _db.Wastes
-            .Find(waste => !waste.IsDeleted)
-            .ToListAsync();
-
-        var summary = new
+        var items = await _db.Wastes.Find(x => !x.IsDeleted).ToListAsync();
+        return Ok(ApiResponse<object>.Ok(new
         {
-            totalRecords = wastes.Count,
-
-            availableRecords =
-                wastes.Count(item =>
-                    item.AvailableQuantity > 0),
-
-            estimatedWasteCost =
-                wastes.Sum(item =>
-                    item.EstimatedCost),
-
-            estimatedRecoveryValue =
-                wastes.Sum(item =>
-                    item.EstimatedRecoveryValue),
-
-            recoveredValue =
-                wastes.Sum(item =>
-                    item.RecoveredValue),
-
-            reusableQuantity =
-                wastes
-                    .Where(item =>
-                        item.Classification ==
-                        "Reusable")
-                    .Sum(item =>
-                        item.AvailableQuantity),
-
-            sellableQuantity =
-                wastes
-                    .Where(item =>
-                        item.Classification ==
-                        "Sellable")
-                    .Sum(item =>
-                        item.AvailableQuantity)
-        };
-
-        return Ok(
-            ApiResponse<object>.Ok(
-                summary,
-                "Resumen de merma obtenido correctamente"
-            )
-        );
+            totalRecords = items.Count,
+            availableRecords = items.Count(x => x.AvailableQuantity > 0),
+            estimatedWasteCost = InventoryRoundingService.RoundMoney(items.Sum(x => x.EstimatedCost)),
+            estimatedRecoveryValue = InventoryRoundingService.RoundMoney(items.Sum(x => x.EstimatedRecoveryValue)),
+            recoveredValue = InventoryRoundingService.RoundMoney(items.Sum(x => x.RecoveredValue)),
+            reusableQuantity = items.Where(x => x.Classification == WasteClassification.Reusable).Sum(x => x.AvailableQuantity),
+            sellableQuantity = items.Where(x => x.Classification == WasteClassification.Sellable).Sum(x => x.AvailableQuantity)
+        }, "Resumen de merma obtenido correctamente"));
     }
 
-    // =========================================================
-    // POST: api/Waste
-    // Merma manual fuera de una producción.
-    // Sí descuenta inventario normal.
-    // =========================================================
     [HttpPost]
-    public async Task<IActionResult> Create(
-        [FromBody] WasteCreateDto dto)
+    public async Task<IActionResult> Create([FromBody] WasteCreateDto dto)
     {
-        var validationError =
-            ValidateCreate(dto);
+        if (string.IsNullOrWhiteSpace(dto.RawMaterialId)) return BadRequest(ApiResponse<Waste>.Fail("Selecciona una materia prima"));
+        if (string.IsNullOrWhiteSpace(dto.Reason)) return BadRequest(ApiResponse<Waste>.Fail("Indica el motivo"));
+        if ((dto.Notes ?? string.Empty).Trim().Length > 1000) return BadRequest(ApiResponse<Waste>.Fail("Las notas no pueden superar 1000 caracteres"));
+        var material = await _db.RawMaterials.Find(x => x.Id == dto.RawMaterialId && !x.IsDeleted && x.IsActive).FirstOrDefaultAsync();
+        if (material == null) return BadRequest(ApiResponse<Waste>.Fail("Materia prima inexistente o inactiva"));
+        var quantityError = QuantityValidationService.ValidateQuantity(dto.Quantity, _inventory.BuildUnitSnapshot(material), "La cantidad");
+        if (quantityError != null) return BadRequest(ApiResponse<Waste>.Fail(quantityError));
+        var recoveryError = QuantityValidationService.ValidateCost(dto.EstimatedRecoveryValue, "El valor recuperable");
+        if (recoveryError != null) return BadRequest(ApiResponse<Waste>.Fail(recoveryError));
+        if (material.CurrentStock < dto.Quantity) return BadRequest(ApiResponse<Waste>.Fail("Stock insuficiente"));
 
-        if (validationError != null)
+        using var session = await _db.StartSessionAsync(); session.StartTransaction();
+        try
         {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    validationError
-                )
-            );
-        }
-
-        var material = await _db.RawMaterials
-            .Find(item =>
-                item.Id == dto.RawMaterialId &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
-
-        if (material == null)
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    "Materia prima no encontrada"
-                )
-            );
-        }
-
-        if (material.CurrentStock < dto.Quantity)
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    "Stock insuficiente para registrar la merma"
-                )
-            );
-        }
-
-        var previousStock =
-            material.CurrentStock;
-
-        var newStock =
-            previousStock - dto.Quantity;
-
-        var update =
-            Builders<RawMaterial>.Update
-                .Set(
-                    item => item.CurrentStock,
-                    newStock
-                )
-                .Set(
-                    item => item.UpdatedAt,
-                    DateTime.UtcNow
-                )
-                .Set(
-                    item => item.UpdatedBy,
-                    GetCurrentUserId()
-                );
-
-        await _db.RawMaterials.UpdateOneAsync(
-            item =>
-                item.Id == material.Id &&
-                !item.IsDeleted,
-            update
-        );
-
-        var waste = new Waste
-        {
-            RawMaterialId = material.Id,
-            RawMaterialCode = material.Code,
-            RawMaterialName = material.Name,
-            Unit = material.Unit,
-
-            ProductionOrderId = null,
-            ProductionFolio = null,
-
-            QuantityGenerated = dto.Quantity,
-            AvailableQuantity = dto.Quantity,
-
-            Classification = dto.Classification,
-            Destination = dto.Destination,
-            Status = "Available",
-
-            UnitCost = material.AverageCost,
-
-            EstimatedCost =
-                dto.Quantity *
-                material.AverageCost,
-
-            EstimatedRecoveryValue =
-                dto.EstimatedRecoveryValue,
-
-            RecoveredValue = 0,
-
-            Reason = dto.Reason.Trim(),
-            Notes = dto.Notes.Trim(),
-
-            WasteDate = DateTime.UtcNow,
-
-            CreatedAt = DateTime.UtcNow,
-            CreatedBy = GetCurrentUserId(),
-            IsDeleted = false
-        };
-
-        await _db.Wastes.InsertOneAsync(waste);
-
-        var movement =
-            new RawMaterialMovement
+            var waste = new Waste
             {
-                RawMaterialId = material.Id,
-                RawMaterialCode = material.Code,
-                RawMaterialName = material.Name,
-
-                MovementType = "Waste",
-
-                Quantity = dto.Quantity,
-
-                PreviousStock = previousStock,
-                NewStock = newStock,
-
-                Unit = material.Unit,
-
-                Reason =
-                    $"Merma manual: {dto.Reason.Trim()}",
-
-                ReferenceType = "Waste",
-                ReferenceId = waste.Id,
-
+                RawMaterialId = material.Id, RawMaterialCode = material.Code, RawMaterialName = material.Name,
+                UnitOfMeasureId = material.UnitOfMeasureId, UnitCode = material.UnitCode, UnitName = material.UnitName,
+                UnitSymbol = material.UnitSymbol, UnitAllowsDecimals = material.UnitAllowsDecimals,
+                UnitDecimalPlaces = material.UnitDecimalPlaces, Unit = material.UnitSymbol,
+                QuantityGenerated = dto.Quantity, AvailableQuantity = dto.Quantity,
+                Classification = dto.Classification, Destination = dto.Destination, Status = WasteStatus.Available,
                 UnitCost = material.AverageCost,
-
-                TotalCost =
-                    dto.Quantity *
-                    material.AverageCost,
-
-                MovementDate = DateTime.UtcNow,
-
-                CreatedAt = DateTime.UtcNow,
-                CreatedBy = GetCurrentUserId(),
-
-                IsDeleted = false
+                EstimatedCost = InventoryRoundingService.RoundEstimatedCost(dto.Quantity * material.AverageCost),
+                EstimatedRecoveryValue = InventoryRoundingService.RoundMoney(dto.EstimatedRecoveryValue),
+                Reason = dto.Reason.Trim(), Notes = dto.Notes.Trim(), WasteDate = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow, CreatedBy = User.FindFirstValue(ClaimTypes.NameIdentifier), IsDeleted = false
             };
-
-        await _db.RawMaterialMovements
-            .InsertOneAsync(movement);
-
-        return Ok(
-            ApiResponse<Waste>.Ok(
-                waste,
-                "Merma registrada y stock descontado correctamente"
-            )
-        );
+            await _inventory.IssueRawMaterialAsync(session, material, dto.Quantity, "Waste",
+                dto.Reason.Trim(), "Waste", waste.Id, User.FindFirstValue(ClaimTypes.NameIdentifier));
+            await _db.Wastes.InsertOneAsync(session, waste);
+            await session.CommitTransactionAsync();
+            return Ok(ApiResponse<Waste>.Ok(waste, "Merma registrada correctamente"));
+        }
+        catch (InvalidOperationException ex) { await session.AbortTransactionAsync(); return Conflict(ApiResponse<Waste>.Fail(ex.Message)); }
+        catch { await session.AbortTransactionAsync(); throw; }
     }
 
-    // =========================================================
-    // POST: api/Waste/{id}/dispose
-    // Reutilizar, vender, reciclar o desechar.
-    // =========================================================
     [HttpPost("{id}/dispose")]
-    public async Task<IActionResult> Dispose(
-        string id,
-        [FromBody] WasteDispositionDto dto)
+    public async Task<IActionResult> Dispose(string id, [FromBody] WasteDispositionDto dto)
     {
-        if (dto.Quantity <= 0)
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    "La cantidad debe ser mayor a cero"
-                )
-            );
-        }
-
-        if (!AllowedActions.Contains(dto.Action))
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    "La acción seleccionada no es válida"
-                )
-            );
-        }
-
-        if (dto.RecoveredValue < 0)
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    "El valor recuperado no puede ser negativo"
-                )
-            );
-        }
-
-        var waste = await _db.Wastes
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
-
-        if (waste == null)
-        {
-            return NotFound(
-                ApiResponse<Waste>.Fail(
-                    "Registro de merma no encontrado"
-                )
-            );
-        }
-
-        if (waste.AvailableQuantity <
-            dto.Quantity)
-        {
-            return BadRequest(
-                ApiResponse<Waste>.Fail(
-                    $"Cantidad insuficiente. Disponible: " +
-                    $"{waste.AvailableQuantity} {waste.Unit}"
-                )
-            );
-        }
+        if (dto.Action == WasteDestination.Pending) return BadRequest(ApiResponse<Waste>.Fail("Selecciona una acción definitiva"));
+        var waste = await _db.Wastes.Find(x => x.Id == id && !x.IsDeleted).FirstOrDefaultAsync();
+        if (waste == null) return NotFound(ApiResponse<Waste>.Fail("Merma no encontrada"));
+        var unit = new UnitOfMeasure { Symbol = waste.UnitSymbol, SingularName = waste.UnitName, AllowsDecimals = waste.UnitAllowsDecimals, DecimalPlaces = waste.UnitDecimalPlaces };
+        var qError = QuantityValidationService.ValidateQuantity(dto.Quantity, unit, "La cantidad");
+        if (qError != null) return BadRequest(ApiResponse<Waste>.Fail(qError));
+        var valueError = QuantityValidationService.ValidateCost(dto.RecoveredValue, "El valor recuperado");
+        if (valueError != null) return BadRequest(ApiResponse<Waste>.Fail(valueError));
+        if (dto.Quantity > waste.AvailableQuantity) return BadRequest(ApiResponse<Waste>.Fail("La cantidad supera la merma disponible"));
 
         waste.AvailableQuantity -= dto.Quantity;
+        waste.RecoveredValue = InventoryRoundingService.RoundMoney(waste.RecoveredValue + dto.RecoveredValue);
         waste.Destination = dto.Action;
-        waste.RecoveredValue += dto.RecoveredValue;
-
-        waste.Status =
-            waste.AvailableQuantity <= 0
-                ? GetCompletedStatus(dto.Action)
-                : "PartiallyUsed";
-
-        if (!string.IsNullOrWhiteSpace(dto.Notes))
+        waste.Status = waste.AvailableQuantity == 0 ? WasteStatus.Consumed : WasteStatus.PartiallyDisposed;
+        waste.Dispositions.Add(new WasteDisposition
         {
-            waste.Notes =
-                $"{waste.Notes}\n{dto.Action}: {dto.Notes.Trim()}"
-                    .Trim();
-        }
-
-        waste.UpdatedAt = DateTime.UtcNow;
-        waste.UpdatedBy = GetCurrentUserId();
-
-        await _db.Wastes.ReplaceOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            waste
-        );
-
-        return Ok(
-            ApiResponse<Waste>.Ok(
-                waste,
-                "Disposición de merma registrada correctamente"
-            )
-        );
+            Action = dto.Action, Quantity = dto.Quantity,
+            RecoveredValue = InventoryRoundingService.RoundMoney(dto.RecoveredValue), Notes = dto.Notes.Trim(),
+            DisposedAt = DateTime.UtcNow, DisposedBy = User.FindFirstValue(ClaimTypes.NameIdentifier)
+        });
+        waste.UpdatedAt = DateTime.UtcNow; waste.UpdatedBy = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        await _db.Wastes.ReplaceOneAsync(x => x.Id == id && !x.IsDeleted, waste);
+        return Ok(ApiResponse<Waste>.Ok(waste, "Disposición registrada correctamente"));
     }
 
-    private static string? ValidateCreate(
-        WasteCreateDto dto)
+    [HttpDelete("{id}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> Delete(string id)
     {
-        if (string.IsNullOrWhiteSpace(
-            dto.RawMaterialId))
-        {
-            return "Debes seleccionar una materia prima";
-        }
-
-        if (dto.Quantity <= 0)
-            return "La cantidad debe ser mayor a cero";
-
-        if (!AllowedClassifications.Contains(
-            dto.Classification))
-        {
-            return "La clasificación no es válida";
-        }
-
-        if (!AllowedDestinations.Contains(
-            dto.Destination))
-        {
-            return "El destino no es válido";
-        }
-
-        if (string.IsNullOrWhiteSpace(dto.Reason))
-            return "Debes indicar el motivo";
-
-        if (dto.EstimatedRecoveryValue < 0)
-        {
-            return "El valor estimado de recuperación no puede ser negativo";
-        }
-
-        return null;
-    }
-
-    private static string GetCompletedStatus(
-        string action)
-    {
-        return action switch
-        {
-            "Reuse" => "Consumed",
-            "Sell" => "Sold",
-            "Recycle" => "Recycled",
-            "Repair" => "Reworked",
-            "Discard" => "Discarded",
-            _ => "Consumed"
-        };
-    }
-
-    private string? GetCurrentUserId()
-    {
-        return User.FindFirstValue(
-            ClaimTypes.NameIdentifier
-        );
+        var waste = await _db.Wastes.Find(x => x.Id == id && !x.IsDeleted).FirstOrDefaultAsync();
+        if (waste == null) return NotFound(ApiResponse<string>.Fail("Merma no encontrada"));
+        if (waste.Dispositions.Count > 0) return BadRequest(ApiResponse<string>.Fail("No puede eliminarse una merma con disposiciones"));
+        if (!string.IsNullOrWhiteSpace(waste.ProductionOrderId)) return BadRequest(ApiResponse<string>.Fail("No puede eliminarse una merma generada por producción"));
+        await _db.Wastes.UpdateOneAsync(x => x.Id == id, Builders<Waste>.Update.Set(x => x.IsDeleted, true)
+            .Set(x => x.UpdatedAt, DateTime.UtcNow).Set(x => x.UpdatedBy, User.FindFirstValue(ClaimTypes.NameIdentifier)));
+        return Ok(ApiResponse<string>.Ok("Merma eliminada correctamente"));
     }
 }

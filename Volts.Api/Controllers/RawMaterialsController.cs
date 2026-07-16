@@ -27,16 +27,23 @@ public class RawMaterialsController : ControllerBase
         "Other"
     };
 
-    private static readonly string[] AllowedMovementTypes =
-    {
-        "Entry",
-        "Exit",
-        "Adjustment"
-    };
+    /*
+     * Adjustment se elimina de este endpoint.
+     *
+     * Una corrección administrativa debe indicar si
+     * incrementa o disminuye inventario.
+     */
+    private static readonly string[]
+        AllowedManualMovementTypes =
+        {
+            "Entry",
+            "Exit"
+        };
 
     private readonly MongoDbService _db;
 
-    public RawMaterialsController(MongoDbService db)
+    public RawMaterialsController(
+        MongoDbService db)
     {
         _db = db;
     }
@@ -64,8 +71,18 @@ public class RawMaterialsController : ControllerBase
     // GET: api/RawMaterials/{id}
     // =========================================================
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetById(string id)
+    public async Task<IActionResult> GetById(
+        string id)
     {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    "El identificador de la materia prima es obligatorio"
+                )
+            );
+        }
+
         var material = await _db.RawMaterials
             .Find(item =>
                 item.Id == id &&
@@ -99,37 +116,44 @@ public class RawMaterialsController : ControllerBase
             .Find(material => !material.IsDeleted)
             .ToListAsync();
 
-        var totalMaterials = materials.Count;
+        var totalMaterials =
+            materials.Count;
 
-        var activeMaterials = materials.Count(
-            material => material.IsActive
-        );
+        var activeMaterials =
+            materials.Count(material =>
+                material.IsActive
+            );
 
-        var lowStockMaterials = materials.Count(
-            material =>
+        var lowStockMaterials =
+            materials.Count(material =>
                 material.IsActive &&
-                material.CurrentStock <= material.MinimumStock
-        );
+                material.CurrentStock <=
+                    material.MinimumStock
+            );
 
-        var outOfStockMaterials = materials.Count(
-            material =>
+        var outOfStockMaterials =
+            materials.Count(material =>
                 material.IsActive &&
                 material.CurrentStock <= 0
-        );
+            );
 
-        var recycledMaterials = materials.Count(
-            material => material.IsRecycled
-        );
+        var recycledMaterials =
+            materials.Count(material =>
+                material.IsRecycled
+            );
 
-        var reusableMaterials = materials.Count(
-            material => material.IsReusable
-        );
+        var reusableMaterials =
+            materials.Count(material =>
+                material.IsReusable
+            );
 
-        var totalInventoryValue = materials.Sum(
-            material =>
-                material.CurrentStock *
-                material.AverageCost
-        );
+        var totalInventoryValue =
+            InventoryRoundingService.RoundMoney(
+                materials.Sum(material =>
+                    material.CurrentStock *
+                    material.AverageCost
+                )
+            );
 
         var data = new
         {
@@ -160,7 +184,8 @@ public class RawMaterialsController : ControllerBase
             .Find(material =>
                 !material.IsDeleted &&
                 material.IsActive &&
-                material.CurrentStock <= material.MinimumStock)
+                material.CurrentStock <=
+                    material.MinimumStock)
             .SortBy(material => material.Name)
             .ToListAsync();
 
@@ -176,34 +201,41 @@ public class RawMaterialsController : ControllerBase
     // GET: api/RawMaterials/{id}/movements
     // =========================================================
     [HttpGet("{id}/movements")]
-    public async Task<IActionResult> GetMovements(string id)
+    public async Task<IActionResult> GetMovements(
+        string id)
     {
-        var materialExists = await _db.RawMaterials
-            .Find(material =>
-                material.Id == id &&
-                !material.IsDeleted)
-            .AnyAsync();
+        var materialExists =
+            await _db.RawMaterials
+                .Find(material =>
+                    material.Id == id &&
+                    !material.IsDeleted)
+                .AnyAsync();
 
         if (!materialExists)
         {
             return NotFound(
-                ApiResponse<List<RawMaterialMovement>>.Fail(
+                ApiResponse<
+                    List<RawMaterialMovement>
+                >.Fail(
                     "Materia prima no encontrada"
                 )
             );
         }
 
-        var movements = await _db.RawMaterialMovements
-            .Find(movement =>
-                movement.RawMaterialId == id &&
-                !movement.IsDeleted)
-            .SortByDescending(movement =>
-                movement.MovementDate)
-            .Limit(200)
-            .ToListAsync();
+        var movements =
+            await _db.RawMaterialMovements
+                .Find(movement =>
+                    movement.RawMaterialId == id &&
+                    !movement.IsDeleted)
+                .SortByDescending(movement =>
+                    movement.MovementDate)
+                .Limit(200)
+                .ToListAsync();
 
         return Ok(
-            ApiResponse<List<RawMaterialMovement>>.Ok(
+            ApiResponse<
+                List<RawMaterialMovement>
+            >.Ok(
                 movements,
                 "Movimientos obtenidos correctamente"
             )
@@ -217,26 +249,88 @@ public class RawMaterialsController : ControllerBase
     public async Task<IActionResult> Create(
         [FromBody] RawMaterialCreateDto dto)
     {
-        var validationError = ValidateMaterial(dto);
+        var structuralError =
+            ValidateMaterialStructure(dto);
 
-        if (validationError != null)
+        if (structuralError != null)
         {
             return BadRequest(
                 ApiResponse<RawMaterial>.Fail(
-                    validationError
+                    structuralError
                 )
             );
         }
 
-        var normalizedCode = NormalizeCode(dto.Code);
-        var normalizedName = dto.Name.Trim();
+        var unitResult =
+            await GetActiveUnitAsync(
+                dto.UnitOfMeasureId
+            );
 
-        var codeExists = await _db.RawMaterials
-            .Find(material =>
-                material.Code.ToUpper() ==
-                normalizedCode.ToUpper() &&
-                !material.IsDeleted)
-            .AnyAsync();
+        if (unitResult.Unit == null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    unitResult.ErrorMessage!
+                )
+            );
+        }
+
+        var unit = unitResult.Unit;
+
+        var quantityError =
+            ValidateMaterialQuantities(
+                dto,
+                unit
+            );
+
+        if (quantityError != null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    quantityError
+                )
+            );
+        }
+
+        var costError =
+            ValidateMaterialCosts(dto);
+
+        if (costError != null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    costError
+                )
+            );
+        }
+
+        var supplierResult =
+            await ResolvePreferredSupplierAsync(
+                dto.PreferredSupplierId
+            );
+
+        if (!supplierResult.Success)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    supplierResult.ErrorMessage!
+                )
+            );
+        }
+
+        var normalizedCode =
+            NormalizeCode(dto.Code);
+
+        var normalizedName =
+            dto.Name.Trim();
+
+        var codeExists =
+            await _db.RawMaterials
+                .Find(material =>
+                    material.Code.ToUpper() ==
+                        normalizedCode.ToUpper() &&
+                    !material.IsDeleted)
+                .AnyAsync();
 
         if (codeExists)
         {
@@ -247,12 +341,13 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        var nameExists = await _db.RawMaterials
-            .Find(material =>
-                material.Name.ToLower() ==
-                normalizedName.ToLower() &&
-                !material.IsDeleted)
-            .AnyAsync();
+        var nameExists =
+            await _db.RawMaterials
+                .Find(material =>
+                    material.Name.ToLower() ==
+                        normalizedName.ToLower() &&
+                    !material.IsDeleted)
+                .AnyAsync();
 
         if (nameExists)
         {
@@ -263,53 +358,147 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
+        var now = DateTime.UtcNow;
+
         var material = new RawMaterial
         {
             Code = normalizedCode,
             Name = normalizedName,
-            Description = dto.Description.Trim(),
-            Category = dto.Category.Trim(),
-            Unit = dto.Unit.Trim(),
-            CurrentStock = dto.CurrentStock,
-            MinimumStock = dto.MinimumStock,
-            MaximumStock = dto.MaximumStock,
-            AverageCost = dto.AverageCost,
-            LastPurchaseCost = dto.LastPurchaseCost,
-            IsRecycled = dto.IsRecycled,
-            IsReusable = dto.IsReusable,
-            RequiresPurchase = dto.RequiresPurchase,
+
+            Description =
+                dto.Description.Trim(),
+
+            Category =
+                dto.Category.Trim(),
+
+            UnitOfMeasureId =
+                unit.Id,
+
+            UnitCode =
+                unit.Code,
+
+            UnitName =
+                unit.SingularName,
+
+            UnitSymbol =
+                unit.Symbol,
+
+            UnitAllowsDecimals =
+                unit.AllowsDecimals,
+
+            UnitDecimalPlaces =
+                unit.DecimalPlaces,
+
+            Unit =
+                unit.Symbol,
+
+            CurrentStock =
+                NormalizeQuantity(
+                    dto.CurrentStock,
+                    unit
+                ),
+
+            MinimumStock =
+                NormalizeQuantity(
+                    dto.MinimumStock,
+                    unit
+                ),
+
+            MaximumStock =
+                NormalizeQuantity(
+                    dto.MaximumStock,
+                    unit
+                ),
+
+            AverageCost =
+                InventoryRoundingService
+                    .RoundUnitCost(
+                        dto.AverageCost
+                    ),
+
+            LastPurchaseCost =
+                InventoryRoundingService
+                    .RoundUnitCost(
+                        dto.LastPurchaseCost
+                    ),
+
+            IsRecycled =
+                dto.IsRecycled,
+
+            IsReusable =
+                dto.IsReusable,
+
+            RequiresPurchase =
+                dto.RequiresPurchase,
+
             StorageLocation =
                 dto.StorageLocation.Trim(),
+
             PreferredSupplierId =
-                NormalizeOptional(dto.PreferredSupplierId),
+                supplierResult.Supplier?.Id,
+
             PreferredSupplierName =
-                NormalizeOptional(dto.PreferredSupplierName),
+                supplierResult.Supplier?.Name,
+
             IsActive = true,
             IsDeleted = false,
-            CreatedAt = DateTime.UtcNow,
+            CreatedAt = now,
             CreatedBy = GetCurrentUserId()
         };
 
-        await _db.RawMaterials.InsertOneAsync(material);
+        using var session =
+            await _db.StartSessionAsync();
 
-        if (material.CurrentStock > 0)
+        try
         {
-            await RegisterMovementAsync(
-                material,
-                movementType: "Entry",
-                quantity: material.CurrentStock,
-                previousStock: 0,
-                newStock: material.CurrentStock,
-                reason: "Inventario inicial",
-                unitCost: material.AverageCost,
-                referenceType: "InitialStock",
-                referenceId: null
+            session.StartTransaction();
+
+            await _db.RawMaterials.InsertOneAsync(
+                session,
+                material
             );
+
+            if (material.CurrentStock > 0)
+            {
+                var movement =
+                    BuildMovement(
+                        material,
+                        movementType: "Entry",
+                        quantity:
+                            material.CurrentStock,
+                        previousStock: 0,
+                        newStock:
+                            material.CurrentStock,
+                        reason:
+                            "Inventario inicial",
+                        unitCost:
+                            material.AverageCost,
+                        referenceType:
+                            "InitialStock",
+                        referenceId: null
+                    );
+
+                await _db.RawMaterialMovements
+                    .InsertOneAsync(
+                        session,
+                        movement
+                    );
+            }
+
+            await session.CommitTransactionAsync();
+        }
+        catch
+        {
+            await session.AbortTransactionAsync();
+            throw;
         }
 
         return CreatedAtAction(
             nameof(GetById),
-            new { id = material.Id },
+            new
+            {
+                id = material.Id
+            },
             ApiResponse<RawMaterial>.Ok(
                 material,
                 "Materia prima creada correctamente"
@@ -319,29 +508,32 @@ public class RawMaterialsController : ControllerBase
 
     // =========================================================
     // PUT: api/RawMaterials/{id}
-    // Los cambios de stock se hacen mediante movimientos.
+    //
+    // El stock actual nunca se reemplaza desde aquí.
     // =========================================================
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(
         string id,
         [FromBody] RawMaterialUpdateDto dto)
     {
-        var validationError = ValidateMaterial(dto);
+        var structuralError =
+            ValidateMaterialStructure(dto);
 
-        if (validationError != null)
+        if (structuralError != null)
         {
             return BadRequest(
                 ApiResponse<RawMaterial>.Fail(
-                    validationError
+                    structuralError
                 )
             );
         }
 
-        var material = await _db.RawMaterials
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+        var material =
+            await _db.RawMaterials
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
 
         if (material == null)
         {
@@ -352,16 +544,101 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        var normalizedCode = NormalizeCode(dto.Code);
-        var normalizedName = dto.Name.Trim();
+        var unitResult =
+            await GetActiveUnitAsync(
+                dto.UnitOfMeasureId
+            );
 
-        var duplicateCode = await _db.RawMaterials
-            .Find(item =>
-                item.Id != id &&
-                item.Code.ToUpper() ==
-                normalizedCode.ToUpper() &&
-                !item.IsDeleted)
-            .AnyAsync();
+        if (unitResult.Unit == null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    unitResult.ErrorMessage!
+                )
+            );
+        }
+
+        var unit = unitResult.Unit;
+
+        var hasMovements =
+            await _db.RawMaterialMovements
+                .Find(movement =>
+                    movement.RawMaterialId ==
+                        material.Id &&
+                    !movement.IsDeleted)
+                .AnyAsync();
+
+        if (hasMovements &&
+            material.UnitOfMeasureId != unit.Id)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    "No se puede cambiar la unidad de una materia prima que ya tiene movimientos de inventario"
+                )
+            );
+        }
+
+        /*
+         * En edición se valida el stock actual real,
+         * no el valor CurrentStock recibido por el DTO.
+         */
+        var quantityError =
+            ValidateUpdateQuantities(
+                material.CurrentStock,
+                dto.MinimumStock,
+                dto.MaximumStock,
+                unit
+            );
+
+        if (quantityError != null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    quantityError
+                )
+            );
+        }
+
+        var costError =
+            ValidateMaterialCosts(dto);
+
+        if (costError != null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    costError
+                )
+            );
+        }
+
+        var supplierResult =
+            await ResolvePreferredSupplierAsync(
+                dto.PreferredSupplierId
+            );
+
+        if (!supplierResult.Success)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    supplierResult.ErrorMessage!
+                )
+            );
+        }
+
+        var normalizedCode =
+            NormalizeCode(dto.Code);
+
+        var normalizedName =
+            dto.Name.Trim();
+
+        var duplicateCode =
+            await _db.RawMaterials
+                .Find(item =>
+                    item.Id != id &&
+                    item.Code.ToUpper() ==
+                        normalizedCode.ToUpper() &&
+                    !item.IsDeleted)
+                .AnyAsync();
 
         if (duplicateCode)
         {
@@ -372,13 +649,14 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        var duplicateName = await _db.RawMaterials
-            .Find(item =>
-                item.Id != id &&
-                item.Name.ToLower() ==
-                normalizedName.ToLower() &&
-                !item.IsDeleted)
-            .AnyAsync();
+        var duplicateName =
+            await _db.RawMaterials
+                .Find(item =>
+                    item.Id != id &&
+                    item.Name.ToLower() ==
+                        normalizedName.ToLower() &&
+                    !item.IsDeleted)
+                .AnyAsync();
 
         if (duplicateName)
         {
@@ -389,53 +667,116 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        material.Code = normalizedCode;
-        material.Name = normalizedName;
+        material.Code =
+            normalizedCode;
+
+        material.Name =
+            normalizedName;
+
         material.Description =
             dto.Description.Trim();
+
         material.Category =
             dto.Category.Trim();
+
+        material.UnitOfMeasureId =
+            unit.Id;
+
+        material.UnitCode =
+            unit.Code;
+
+        material.UnitName =
+            unit.SingularName;
+
+        material.UnitSymbol =
+            unit.Symbol;
+
+        material.UnitAllowsDecimals =
+            unit.AllowsDecimals;
+
+        material.UnitDecimalPlaces =
+            unit.DecimalPlaces;
+
         material.Unit =
-            dto.Unit.Trim();
+            unit.Symbol;
+
+        material.MinimumStock =
+            NormalizeQuantity(
+                dto.MinimumStock,
+                unit
+            );
+
+        material.MaximumStock =
+            NormalizeQuantity(
+                dto.MaximumStock,
+                unit
+            );
 
         /*
-         * El stock actual no se reemplaza desde la edición.
-         * Las entradas y salidas deben registrarse con
-         * el endpoint adjust-stock.
+         * AverageCost y LastPurchaseCost se conservan
+         * por compatibilidad administrativa durante
+         * este bloque.
+         *
+         * Cuando se corrija Compras, su modificación
+         * normal ocurrirá únicamente desde compras y
+         * movimientos autorizados.
          */
-        material.MinimumStock =
-            dto.MinimumStock;
-        material.MaximumStock =
-            dto.MaximumStock;
         material.AverageCost =
-            dto.AverageCost;
+            InventoryRoundingService
+                .RoundUnitCost(
+                    dto.AverageCost
+                );
+
         material.LastPurchaseCost =
-            dto.LastPurchaseCost;
+            InventoryRoundingService
+                .RoundUnitCost(
+                    dto.LastPurchaseCost
+                );
+
         material.IsRecycled =
             dto.IsRecycled;
+
         material.IsReusable =
             dto.IsReusable;
+
         material.RequiresPurchase =
             dto.RequiresPurchase;
+
         material.StorageLocation =
             dto.StorageLocation.Trim();
+
         material.PreferredSupplierId =
-            NormalizeOptional(dto.PreferredSupplierId);
+            supplierResult.Supplier?.Id;
+
         material.PreferredSupplierName =
-            NormalizeOptional(dto.PreferredSupplierName);
+            supplierResult.Supplier?.Name;
+
         material.IsActive =
             dto.IsActive;
+
         material.UpdatedAt =
             DateTime.UtcNow;
+
         material.UpdatedBy =
             GetCurrentUserId();
 
-        await _db.RawMaterials.ReplaceOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            material
-        );
+        var result =
+            await _db.RawMaterials
+                .ReplaceOneAsync(
+                    item =>
+                        item.Id == id &&
+                        !item.IsDeleted,
+                    material
+                );
+
+        if (result.MatchedCount == 0)
+        {
+            return NotFound(
+                ApiResponse<RawMaterial>.Fail(
+                    "Materia prima no encontrada"
+                )
+            );
+        }
 
         return Ok(
             ApiResponse<RawMaterial>.Ok(
@@ -447,45 +788,45 @@ public class RawMaterialsController : ControllerBase
 
     // =========================================================
     // POST: api/RawMaterials/{id}/adjust-stock
+    //
+    // Aunque la ruta conserva el nombre adjust-stock,
+    // MovementType solamente permite Entry o Exit.
     // =========================================================
     [HttpPost("{id}/adjust-stock")]
     public async Task<IActionResult> AdjustStock(
         string id,
-        [FromBody] RawMaterialStockAdjustmentDto dto)
+        [FromBody]
+        RawMaterialStockAdjustmentDto dto)
     {
-        if (!AllowedMovementTypes.Contains(
-            dto.MovementType))
+        var movementType =
+     dto.MovementType?.Trim();
+
+        if (string.IsNullOrWhiteSpace(
+                movementType))
         {
             return BadRequest(
                 ApiResponse<RawMaterial>.Fail(
-                    "El tipo de movimiento no es válido"
+                    "El tipo de movimiento es obligatorio"
                 )
             );
         }
 
-        if (dto.Quantity <= 0)
+        if (!AllowedManualMovementTypes.Contains(
+                movementType))
         {
             return BadRequest(
                 ApiResponse<RawMaterial>.Fail(
-                    "La cantidad debe ser mayor a cero"
+                    "El tipo de movimiento debe ser Entry o Exit"
                 )
             );
         }
 
-        if (string.IsNullOrWhiteSpace(dto.Reason))
-        {
-            return BadRequest(
-                ApiResponse<RawMaterial>.Fail(
-                    "Debes indicar el motivo del movimiento"
-                )
-            );
-        }
-
-        var material = await _db.RawMaterials
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+        var material =
+            await _db.RawMaterials
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
 
         if (material == null)
         {
@@ -505,29 +846,100 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        var previousStock = material.CurrentStock;
+        var unit =
+            await ResolveMaterialUnitAsync(
+                material
+            );
 
-        decimal newStock;
-
-        if (dto.MovementType == "Exit")
+        if (unit == null)
         {
-            if (material.CurrentStock < dto.Quantity)
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    "La materia prima no tiene una unidad de medida válida"
+                )
+            );
+        }
+
+        var quantityError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    dto.Quantity,
+                    unit,
+                    "La cantidad"
+                );
+
+        if (quantityError != null)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    quantityError
+                )
+            );
+        }
+
+        var normalizedQuantity =
+            NormalizeQuantity(
+                dto.Quantity,
+                unit
+            );
+
+        decimal unitCost;
+
+        if (dto.UnitCost.HasValue)
+        {
+            var costError =
+                QuantityValidationService
+                    .ValidateCost(
+                        dto.UnitCost.Value,
+                        "El costo unitario"
+                    );
+
+            if (costError != null)
             {
                 return BadRequest(
                     ApiResponse<RawMaterial>.Fail(
-                        $"Stock insuficiente. Disponible: " +
-                        $"{material.CurrentStock} {material.Unit}"
+                        costError
                     )
                 );
             }
 
-            newStock =
-                material.CurrentStock - dto.Quantity;
+            unitCost =
+                InventoryRoundingService
+                    .RoundUnitCost(
+                        dto.UnitCost.Value
+                    );
         }
         else
         {
-            newStock =
-                material.CurrentStock + dto.Quantity;
+            unitCost =
+                material.AverageCost;
+        }
+
+        var previousStock =
+            material.CurrentStock;
+
+        var newStock =
+            movementType == "Exit"
+                ? previousStock -
+                    normalizedQuantity
+                : previousStock +
+                    normalizedQuantity;
+
+        newStock =
+            NormalizeQuantity(
+                newStock,
+                unit
+            );
+
+        if (newStock < 0)
+        {
+            return BadRequest(
+                ApiResponse<RawMaterial>.Fail(
+                    $"Stock insuficiente. Disponible: " +
+                    $"{FormatQuantity(previousStock, unit)} " +
+                    $"{unit.Symbol}"
+                )
+            );
         }
 
         if (material.MaximumStock > 0 &&
@@ -535,62 +947,166 @@ public class RawMaterialsController : ControllerBase
         {
             return BadRequest(
                 ApiResponse<RawMaterial>.Fail(
-                    $"El movimiento superaría el stock máximo " +
-                    $"de {material.MaximumStock} {material.Unit}"
+                    $"El movimiento superaría el stock máximo de " +
+                    $"{FormatQuantity(material.MaximumStock, unit)} " +
+                    $"{unit.Symbol}"
                 )
             );
         }
 
-        var unitCost =
-            dto.UnitCost ?? material.AverageCost;
-
         /*
-         * Para entradas con costo, recalculamos el
-         * costo promedio ponderado.
+         * Una entrada manual con costo puede modificar
+         * el costo promedio ponderado.
+         *
+         * Una salida no modifica el costo promedio.
          */
-        if (dto.MovementType == "Entry" &&
+        var newAverageCost =
+            material.AverageCost;
+
+        var newLastPurchaseCost =
+            material.LastPurchaseCost;
+
+        if (movementType == "Entry" &&
             dto.UnitCost.HasValue)
         {
             var previousValue =
-                material.CurrentStock *
+                previousStock *
                 material.AverageCost;
 
             var incomingValue =
-                dto.Quantity *
-                dto.UnitCost.Value;
+                normalizedQuantity *
+                unitCost;
 
-            material.AverageCost =
+            newAverageCost =
                 newStock == 0
-                    ? dto.UnitCost.Value
-                    : (previousValue + incomingValue) /
-                      newStock;
+                    ? unitCost
+                    : (
+                        previousValue +
+                        incomingValue
+                      ) / newStock;
 
-            material.LastPurchaseCost =
-                dto.UnitCost.Value;
+            newAverageCost =
+                InventoryRoundingService
+                    .RoundUnitCost(
+                        newAverageCost
+                    );
+
+            newLastPurchaseCost =
+                unitCost;
         }
 
-        material.CurrentStock = newStock;
-        material.UpdatedAt = DateTime.UtcNow;
-        material.UpdatedBy = GetCurrentUserId();
+        using var session =
+            await _db.StartSessionAsync();
 
-        await _db.RawMaterials.ReplaceOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            material
-        );
+        try
+        {
+            session.StartTransaction();
 
-        await RegisterMovementAsync(
-            material,
-            dto.MovementType,
-            dto.Quantity,
-            previousStock,
-            newStock,
-            dto.Reason.Trim(),
-            unitCost,
-            dto.ReferenceType.Trim(),
-            NormalizeOptional(dto.ReferenceId)
-        );
+            /*
+             * Se incluye PreviousStock en el filtro.
+             *
+             * Si otra operación cambió el inventario
+             * después de la lectura, este update no
+             * modificará el documento.
+             */
+            var update =
+                Builders<RawMaterial>.Update
+                    .Set(
+                        item =>
+                            item.CurrentStock,
+                        newStock
+                    )
+                    .Set(
+                        item =>
+                            item.AverageCost,
+                        newAverageCost
+                    )
+                    .Set(
+                        item =>
+                            item.LastPurchaseCost,
+                        newLastPurchaseCost
+                    )
+                    .Set(
+                        item =>
+                            item.UpdatedAt,
+                        DateTime.UtcNow
+                    )
+                    .Set(
+                        item =>
+                            item.UpdatedBy,
+                        GetCurrentUserId()
+                    );
+
+            var updateResult =
+                await _db.RawMaterials
+                    .UpdateOneAsync(
+                        session,
+                        item =>
+                            item.Id == id &&
+                            !item.IsDeleted &&
+                            item.IsActive &&
+                            item.CurrentStock ==
+                                previousStock,
+                        update
+                    );
+
+            if (updateResult.ModifiedCount == 0)
+            {
+                await session
+                    .AbortTransactionAsync();
+
+                return Conflict(
+                    ApiResponse<RawMaterial>.Fail(
+                        "El inventario cambió mientras se procesaba la operación. Vuelve a intentarlo."
+                    )
+                );
+            }
+
+            material.CurrentStock =
+                newStock;
+
+            material.AverageCost =
+                newAverageCost;
+
+            material.LastPurchaseCost =
+                newLastPurchaseCost;
+
+            material.UpdatedAt =
+                DateTime.UtcNow;
+
+            material.UpdatedBy =
+                GetCurrentUserId();
+
+            var movement =
+                BuildMovement(
+                    material,
+                    movementType,
+                    normalizedQuantity,
+                    previousStock,
+                    newStock,
+                    dto.Reason.Trim(),
+                    unitCost,
+                    NormalizeReferenceType(
+                        dto.ReferenceType
+                    ),
+                    NormalizeOptional(
+                        dto.ReferenceId
+                    )
+                );
+
+            await _db.RawMaterialMovements
+                .InsertOneAsync(
+                    session,
+                    movement
+                );
+
+            await session.CommitTransactionAsync();
+        }
+        catch
+        {
+            await session.AbortTransactionAsync();
+            throw;
+        }
 
         return Ok(
             ApiResponse<RawMaterial>.Ok(
@@ -601,15 +1117,17 @@ public class RawMaterialsController : ControllerBase
     }
 
     // =========================================================
-    // Compatibilidad con los endpoints anteriores.
     // PUT: api/RawMaterials/{id}/add-stock
+    //
+    // Compatibilidad temporal.
     // =========================================================
     [HttpPut("{id}/add-stock")]
     public async Task<IActionResult> AddStock(
         string id,
-        [FromBody] RawMaterialStockUpdateDto dto)
+        [FromBody]
+        RawMaterialStockUpdateDto dto)
     {
-        return await ExecuteLegacyMovement(
+        return await ExecuteLegacyMovementAsync(
             id,
             dto.Quantity,
             "Entry",
@@ -619,13 +1137,16 @@ public class RawMaterialsController : ControllerBase
 
     // =========================================================
     // PUT: api/RawMaterials/{id}/remove-stock
+    //
+    // Compatibilidad temporal.
     // =========================================================
     [HttpPut("{id}/remove-stock")]
     public async Task<IActionResult> RemoveStock(
         string id,
-        [FromBody] RawMaterialStockUpdateDto dto)
+        [FromBody]
+        RawMaterialStockUpdateDto dto)
     {
-        return await ExecuteLegacyMovement(
+        return await ExecuteLegacyMovementAsync(
             id,
             dto.Quantity,
             "Exit",
@@ -638,13 +1159,15 @@ public class RawMaterialsController : ControllerBase
     // =========================================================
     [HttpDelete("{id}")]
     [Authorize(Roles = "Admin")]
-    public async Task<IActionResult> Delete(string id)
+    public async Task<IActionResult> Delete(
+        string id)
     {
-        var material = await _db.RawMaterials
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+        var material =
+            await _db.RawMaterials
+                .Find(item =>
+                    item.Id == id &&
+                    !item.IsDeleted)
+                .FirstOrDefaultAsync();
 
         if (material == null)
         {
@@ -664,18 +1187,100 @@ public class RawMaterialsController : ControllerBase
             );
         }
 
-        var update = Builders<RawMaterial>.Update
-            .Set(item => item.IsDeleted, true)
-            .Set(item => item.IsActive, false)
-            .Set(item => item.UpdatedAt, DateTime.UtcNow)
-            .Set(item => item.UpdatedBy, GetCurrentUserId());
+        var usedInRecipes =
+            await _db.Recipes
+                .Find(recipe =>
+                    !recipe.IsDeleted &&
+                    recipe.Details.Any(detail =>
+                        detail.RawMaterialId == id
+                    ))
+                .AnyAsync();
 
-        await _db.RawMaterials.UpdateOneAsync(
-            item =>
-                item.Id == id &&
-                !item.IsDeleted,
-            update
-        );
+        if (usedInRecipes)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "No se puede eliminar una materia prima utilizada en recetas. Puedes desactivarla."
+                )
+            );
+        }
+
+        var usedInPurchases =
+            await _db.Purchases
+                .Find(purchase =>
+                    !purchase.IsDeleted &&
+                    purchase.Details.Any(detail =>
+                        detail.RawMaterialId == id
+                    ))
+                .AnyAsync();
+
+        if (usedInPurchases)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "No se puede eliminar una materia prima con compras registradas. Puedes desactivarla."
+                )
+            );
+        }
+
+        var usedInProduction =
+            await _db.ProductionOrders
+                .Find(order =>
+                    !order.IsDeleted &&
+                    order.Materials.Any(item =>
+                        item.RawMaterialId == id
+                    ))
+                .AnyAsync();
+
+        if (usedInProduction)
+        {
+            return BadRequest(
+                ApiResponse<string>.Fail(
+                    "No se puede eliminar una materia prima utilizada en producción. Puedes desactivarla."
+                )
+            );
+        }
+
+        var update =
+            Builders<RawMaterial>.Update
+                .Set(
+                    item =>
+                        item.IsDeleted,
+                    true
+                )
+                .Set(
+                    item =>
+                        item.IsActive,
+                    false
+                )
+                .Set(
+                    item =>
+                        item.UpdatedAt,
+                    DateTime.UtcNow
+                )
+                .Set(
+                    item =>
+                        item.UpdatedBy,
+                    GetCurrentUserId()
+                );
+
+        var result =
+            await _db.RawMaterials
+                .UpdateOneAsync(
+                    item =>
+                        item.Id == id &&
+                        !item.IsDeleted,
+                    update
+                );
+
+        if (result.MatchedCount == 0)
+        {
+            return NotFound(
+                ApiResponse<string>.Fail(
+                    "Materia prima no encontrada"
+                )
+            );
+        }
 
         return Ok(
             ApiResponse<string>.Ok(
@@ -684,91 +1289,125 @@ public class RawMaterialsController : ControllerBase
         );
     }
 
-    private async Task<IActionResult> ExecuteLegacyMovement(
-        string id,
-        decimal quantity,
-        string movementType,
-        string reason)
+    private async Task<IActionResult>
+        ExecuteLegacyMovementAsync(
+            string id,
+            decimal quantity,
+            string movementType,
+            string reason)
     {
-        if (quantity <= 0)
-        {
-            return BadRequest(
-                ApiResponse<RawMaterial>.Fail(
-                    "La cantidad debe ser mayor a cero"
-                )
-            );
-        }
+        var dto =
+            new RawMaterialStockAdjustmentDto
+            {
+                MovementType =
+                    movementType,
 
-        var material = await _db.RawMaterials
-            .Find(item =>
-                item.Id == id &&
-                !item.IsDeleted)
-            .FirstOrDefaultAsync();
+                Quantity =
+                    quantity,
 
-        if (material == null)
-        {
-            return NotFound(
-                ApiResponse<RawMaterial>.Fail(
-                    "Materia prima no encontrada"
-                )
-            );
-        }
+                Reason =
+                    reason,
 
-        var previousStock = material.CurrentStock;
+                ReferenceType =
+                    "Manual"
+            };
 
-        var newStock = movementType == "Exit"
-            ? previousStock - quantity
-            : previousStock + quantity;
-
-        if (newStock < 0)
-        {
-            return BadRequest(
-                ApiResponse<RawMaterial>.Fail(
-                    "Stock insuficiente"
-                )
-            );
-        }
-
-        if (material.MaximumStock > 0 &&
-            newStock > material.MaximumStock)
-        {
-            return BadRequest(
-                ApiResponse<RawMaterial>.Fail(
-                    "La entrada supera el stock máximo configurado"
-                )
-            );
-        }
-
-        material.CurrentStock = newStock;
-        material.UpdatedAt = DateTime.UtcNow;
-        material.UpdatedBy = GetCurrentUserId();
-
-        await _db.RawMaterials.ReplaceOneAsync(
-            item => item.Id == id,
-            material
-        );
-
-        await RegisterMovementAsync(
-            material,
-            movementType,
-            quantity,
-            previousStock,
-            newStock,
-            reason,
-            material.AverageCost,
-            "Manual",
-            null
-        );
-
-        return Ok(
-            ApiResponse<RawMaterial>.Ok(
-                material,
-                "Stock actualizado correctamente"
-            )
+        return await AdjustStock(
+            id,
+            dto
         );
     }
 
-    private async Task RegisterMovementAsync(
+    private async Task<UnitLookupResult>
+        GetActiveUnitAsync(
+            string unitOfMeasureId)
+    {
+        if (string.IsNullOrWhiteSpace(
+                unitOfMeasureId))
+        {
+            return UnitLookupResult.Fail(
+                "La unidad de medida es obligatoria"
+            );
+        }
+
+        var unit =
+            await _db.UnitsOfMeasure
+                .Find(item =>
+                    item.Id == unitOfMeasureId &&
+                    !item.IsDeleted &&
+                    item.IsActive)
+                .FirstOrDefaultAsync();
+
+        return unit == null
+            ? UnitLookupResult.Fail(
+                "La unidad de medida no existe o está inactiva"
+            )
+            : UnitLookupResult.Ok(unit);
+    }
+
+    private async Task<UnitOfMeasure?>
+        ResolveMaterialUnitAsync(
+            RawMaterial material)
+    {
+        if (!string.IsNullOrWhiteSpace(
+                material.UnitOfMeasureId))
+        {
+            return await _db.UnitsOfMeasure
+                .Find(unit =>
+                    unit.Id ==
+                        material.UnitOfMeasureId &&
+                    !unit.IsDeleted)
+                .FirstOrDefaultAsync();
+        }
+
+        /*
+         * Compatibilidad temporal durante la migración.
+         */
+        return await _db.UnitsOfMeasure
+            .Find(unit =>
+                !unit.IsDeleted &&
+                (
+                    unit.Code == material.Unit ||
+                    unit.Symbol == material.Unit ||
+                    unit.SingularName ==
+                        material.Unit ||
+                    unit.PluralName ==
+                        material.Unit
+                ))
+            .FirstOrDefaultAsync();
+    }
+
+    private async Task<SupplierLookupResult>
+        ResolvePreferredSupplierAsync(
+            string? supplierId)
+    {
+        if (string.IsNullOrWhiteSpace(
+                supplierId))
+        {
+            return SupplierLookupResult.Ok(null);
+        }
+
+        var supplier =
+            await _db.Suppliers
+                .Find(item =>
+                    item.Id == supplierId &&
+                    !item.IsDeleted &&
+                    item.IsActive)
+                .FirstOrDefaultAsync();
+
+        if (supplier == null)
+        {
+            return SupplierLookupResult.Fail(
+                "El proveedor preferido no existe o está inactivo"
+            );
+        }
+
+        return SupplierLookupResult.Ok(
+            supplier
+        );
+    }
+
+    private RawMaterialMovement BuildMovement(
         RawMaterial material,
         string movementType,
         decimal quantity,
@@ -779,91 +1418,344 @@ public class RawMaterialsController : ControllerBase
         string referenceType,
         string? referenceId)
     {
-        var movement = new RawMaterialMovement
+        return new RawMaterialMovement
         {
-            RawMaterialId = material.Id,
-            RawMaterialCode = material.Code,
-            RawMaterialName = material.Name,
-            MovementType = movementType,
-            Quantity = quantity,
-            PreviousStock = previousStock,
-            NewStock = newStock,
-            Unit = material.Unit,
-            Reason = reason,
-            ReferenceType = string.IsNullOrWhiteSpace(
-                referenceType)
-                    ? "Manual"
-                    : referenceType,
-            ReferenceId = referenceId,
-            UnitCost = unitCost,
-            TotalCost = quantity * unitCost,
-            MovementDate = DateTime.UtcNow,
-            CreatedAt = DateTime.UtcNow,
-            CreatedBy = GetCurrentUserId()
-        };
+            RawMaterialId =
+                material.Id,
 
-        await _db.RawMaterialMovements
-            .InsertOneAsync(movement);
+            RawMaterialCode =
+                material.Code,
+
+            RawMaterialName =
+                material.Name,
+
+            MovementType =
+                movementType,
+
+            Quantity =
+                quantity,
+
+            PreviousStock =
+                previousStock,
+
+            NewStock =
+                newStock,
+
+            UnitOfMeasureId =
+                material.UnitOfMeasureId,
+
+            UnitCode =
+                material.UnitCode,
+
+            UnitName =
+                material.UnitName,
+
+            UnitSymbol =
+                material.UnitSymbol,
+
+            UnitAllowsDecimals =
+                material.UnitAllowsDecimals,
+
+            UnitDecimalPlaces =
+                material.UnitDecimalPlaces,
+
+            Unit =
+                material.UnitSymbol,
+
+            Reason =
+                reason,
+
+            ReferenceType =
+                referenceType,
+
+            ReferenceId =
+                referenceId,
+
+            UnitCost =
+                InventoryRoundingService
+                    .RoundUnitCost(
+                        unitCost
+                    ),
+
+            TotalCost =
+                InventoryRoundingService
+                    .RoundEstimatedCost(
+                        quantity * unitCost
+                    ),
+
+            MovementDate =
+                DateTime.UtcNow,
+
+            CreatedAt =
+                DateTime.UtcNow,
+
+            CreatedBy =
+                GetCurrentUserId(),
+
+            IsDeleted =
+                false
+        };
     }
 
-    private static string? ValidateMaterial(
-        RawMaterialCreateDto dto)
+    private static string?
+        ValidateMaterialStructure(
+            RawMaterialCreateDto dto)
     {
         if (string.IsNullOrWhiteSpace(dto.Code))
+        {
             return "El código es obligatorio";
+        }
 
         if (dto.Code.Trim().Length > 30)
-            return "El código no puede superar los 30 caracteres";
+        {
+            return
+                "El código no puede superar los 30 caracteres";
+        }
 
         if (string.IsNullOrWhiteSpace(dto.Name))
+        {
             return "El nombre es obligatorio";
+        }
 
         if (dto.Name.Trim().Length < 3)
-            return "El nombre debe tener al menos 3 caracteres";
+        {
+            return
+                "El nombre debe tener al menos 3 caracteres";
+        }
 
         if (dto.Name.Trim().Length > 150)
-            return "El nombre no puede superar los 150 caracteres";
-
-        if (dto.Description.Trim().Length > 500)
-            return "La descripción no puede superar los 500 caracteres";
-
-        if (!AllowedCategories.Contains(dto.Category))
-            return "La categoría de materia prima no es válida";
-
-        if (string.IsNullOrWhiteSpace(dto.Unit))
-            return "La unidad de medida es obligatoria";
-
-        if (dto.CurrentStock < 0)
-            return "El stock actual no puede ser negativo";
-
-        if (dto.MinimumStock < 0)
-            return "El stock mínimo no puede ser negativo";
-
-        if (dto.MaximumStock < 0)
-            return "El stock máximo no puede ser negativo";
-
-        if (dto.MaximumStock > 0 &&
-            dto.MaximumStock < dto.MinimumStock)
         {
-            return "El stock máximo no puede ser menor al stock mínimo";
+            return
+                "El nombre no puede superar los 150 caracteres";
         }
 
-        if (dto.MaximumStock > 0 &&
-            dto.CurrentStock > dto.MaximumStock)
+        if (dto.Description?.Trim().Length > 500)
         {
-            return "El stock actual no puede superar el stock máximo";
+            return
+                "La descripción no puede superar los 500 caracteres";
         }
 
-        if (dto.AverageCost < 0)
-            return "El costo promedio no puede ser negativo";
+        if (!AllowedCategories.Contains(
+                dto.Category))
+        {
+            return
+                "La categoría de materia prima no es válida";
+        }
 
-        if (dto.LastPurchaseCost < 0)
-            return "El último costo no puede ser negativo";
+        if (string.IsNullOrWhiteSpace(
+                dto.UnitOfMeasureId))
+        {
+            return
+                "La unidad de medida es obligatoria";
+        }
 
-        if (dto.StorageLocation.Trim().Length > 100)
-            return "La ubicación no puede superar los 100 caracteres";
+        if (dto.StorageLocation?
+                .Trim()
+                .Length > 100)
+        {
+            return
+                "La ubicación no puede superar los 100 caracteres";
+        }
 
         return null;
+    }
+
+    private static string?
+        ValidateMaterialQuantities(
+            RawMaterialCreateDto dto,
+            UnitOfMeasure unit)
+    {
+        var currentError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    dto.CurrentStock,
+                    unit,
+                    "El stock actual",
+                    positiveRequired: false
+                );
+
+        if (currentError != null)
+        {
+            return currentError;
+        }
+
+        var minimumError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    dto.MinimumStock,
+                    unit,
+                    "El stock mínimo",
+                    positiveRequired: false
+                );
+
+        if (minimumError != null)
+        {
+            return minimumError;
+        }
+
+        var maximumError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    dto.MaximumStock,
+                    unit,
+                    "El stock máximo",
+                    positiveRequired: false
+                );
+
+        if (maximumError != null)
+        {
+            return maximumError;
+        }
+
+        return ValidateStockLimits(
+            dto.CurrentStock,
+            dto.MinimumStock,
+            dto.MaximumStock
+        );
+    }
+
+    private static string?
+        ValidateUpdateQuantities(
+            decimal currentStock,
+            decimal minimumStock,
+            decimal maximumStock,
+            UnitOfMeasure unit)
+    {
+        var currentError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    currentStock,
+                    unit,
+                    "El stock actual",
+                    positiveRequired: false
+                );
+
+        if (currentError != null)
+        {
+            return currentError;
+        }
+
+        var minimumError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    minimumStock,
+                    unit,
+                    "El stock mínimo",
+                    positiveRequired: false
+                );
+
+        if (minimumError != null)
+        {
+            return minimumError;
+        }
+
+        var maximumError =
+            QuantityValidationService
+                .ValidateQuantity(
+                    maximumStock,
+                    unit,
+                    "El stock máximo",
+                    positiveRequired: false
+                );
+
+        if (maximumError != null)
+        {
+            return maximumError;
+        }
+
+        return ValidateStockLimits(
+            currentStock,
+            minimumStock,
+            maximumStock
+        );
+    }
+
+    private static string?
+        ValidateStockLimits(
+            decimal currentStock,
+            decimal minimumStock,
+            decimal maximumStock)
+    {
+        if (maximumStock > 0 &&
+            maximumStock < minimumStock)
+        {
+            return
+                "El stock máximo no puede ser menor al stock mínimo";
+        }
+
+        if (maximumStock > 0 &&
+            currentStock > maximumStock)
+        {
+            return
+                "El stock actual no puede superar el stock máximo";
+        }
+
+        return null;
+    }
+
+    private static string?
+        ValidateMaterialCosts(
+            RawMaterialCreateDto dto)
+    {
+        var averageCostError =
+            QuantityValidationService
+                .ValidateCost(
+                    dto.AverageCost,
+                    "El costo promedio"
+                );
+
+        if (averageCostError != null)
+        {
+            return averageCostError;
+        }
+
+        var lastCostError =
+            QuantityValidationService
+                .ValidateCost(
+                    dto.LastPurchaseCost,
+                    "El último costo de compra"
+                );
+
+        return lastCostError;
+    }
+
+    private static decimal NormalizeQuantity(
+        decimal quantity,
+        UnitOfMeasure unit)
+    {
+        if (!unit.AllowsDecimals)
+        {
+            return decimal.Truncate(quantity);
+        }
+
+        return decimal.Round(
+            quantity,
+            unit.DecimalPlaces,
+            MidpointRounding.AwayFromZero
+        );
+    }
+
+    private static string FormatQuantity(
+        decimal quantity,
+        UnitOfMeasure unit)
+    {
+        if (!unit.AllowsDecimals)
+        {
+            return decimal
+                .Truncate(quantity)
+                .ToString("0");
+        }
+
+        var format =
+            unit.DecimalPlaces == 0
+                ? "0"
+                : "0." +
+                  new string(
+                      '#',
+                      unit.DecimalPlaces
+                  );
+
+        return quantity.ToString(format);
     }
 
     private string? GetCurrentUserId()
@@ -873,7 +1765,8 @@ public class RawMaterialsController : ControllerBase
         );
     }
 
-    private static string NormalizeCode(string value)
+    private static string NormalizeCode(
+        string value)
     {
         return value
             .Trim()
@@ -881,10 +1774,73 @@ public class RawMaterialsController : ControllerBase
             .Replace(" ", "-");
     }
 
-    private static string? NormalizeOptional(string? value)
+    private static string NormalizeReferenceType(
+        string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "Manual"
+            : value.Trim();
+    }
+
+    private static string? NormalizeOptional(
+        string? value)
     {
         return string.IsNullOrWhiteSpace(value)
             ? null
             : value.Trim();
+    }
+
+    private sealed class UnitLookupResult
+    {
+        public UnitOfMeasure? Unit { get; init; }
+
+        public string? ErrorMessage { get; init; }
+
+        public static UnitLookupResult Ok(
+            UnitOfMeasure unit)
+        {
+            return new UnitLookupResult
+            {
+                Unit = unit
+            };
+        }
+
+        public static UnitLookupResult Fail(
+            string message)
+        {
+            return new UnitLookupResult
+            {
+                ErrorMessage = message
+            };
+        }
+    }
+
+    private sealed class SupplierLookupResult
+    {
+        public bool Success { get; init; }
+
+        public Supplier? Supplier { get; init; }
+
+        public string? ErrorMessage { get; init; }
+
+        public static SupplierLookupResult Ok(
+            Supplier? supplier)
+        {
+            return new SupplierLookupResult
+            {
+                Success = true,
+                Supplier = supplier
+            };
+        }
+
+        public static SupplierLookupResult Fail(
+            string message)
+        {
+            return new SupplierLookupResult
+            {
+                Success = false,
+                ErrorMessage = message
+            };
+        }
     }
 }

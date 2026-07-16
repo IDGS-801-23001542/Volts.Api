@@ -22,7 +22,8 @@ public class MongoDbService
         );
     }
 
-    public Task<IClientSessionHandle> StartSessionAsync()
+    public Task<IClientSessionHandle>
+        StartSessionAsync()
     {
         return _client.StartSessionAsync();
     }
@@ -34,64 +35,110 @@ public class MongoDbService
         _database.GetCollection<Role>("Roles");
 
     public IMongoCollection<Customer> Customers =>
-        _database.GetCollection<Customer>("Customers");
+        _database.GetCollection<Customer>(
+            "Customers"
+        );
 
     public IMongoCollection<Product> Products =>
-        _database.GetCollection<Product>("Products");
-
-    public IMongoCollection<ContactMessage> ContactMessages =>
-        _database.GetCollection<ContactMessage>(
-            "ContactMessages"
+        _database.GetCollection<Product>(
+            "Products"
         );
+
+    public IMongoCollection<CommercialPlan> CommercialPlans =>
+        _database.GetCollection<CommercialPlan>(
+            "CommercialPlans"
+        );
+
+    public IMongoCollection<CommercialPackage> CommercialPackages =>
+        _database.GetCollection<CommercialPackage>(
+            "CommercialPackages"
+        );
+
+    public IMongoCollection<ContactMessage>
+        ContactMessages =>
+            _database.GetCollection<ContactMessage>(
+                "ContactMessages"
+            );
 
     public IMongoCollection<Quote> Quotes =>
         _database.GetCollection<Quote>("Quotes");
 
-    public IMongoCollection<Institution> Institutions =>
-        _database.GetCollection<Institution>(
-            "Institutions"
-        );
+    public IMongoCollection<Institution>
+        Institutions =>
+            _database.GetCollection<Institution>(
+                "Institutions"
+            );
 
     public IMongoCollection<License> Licenses =>
-        _database.GetCollection<License>("Licenses");
+        _database.GetCollection<License>(
+            "Licenses"
+        );
 
     public IMongoCollection<Category> Categories =>
-        _database.GetCollection<Category>("Categories");
+        _database.GetCollection<Category>(
+            "Categories"
+        );
 
     public IMongoCollection<Supplier> Suppliers =>
-        _database.GetCollection<Supplier>("Suppliers");
-
-    public IMongoCollection<RawMaterial> RawMaterials =>
-        _database.GetCollection<RawMaterial>(
-            "RawMaterials"
+        _database.GetCollection<Supplier>(
+            "Suppliers"
         );
+
+    /*
+     * Catálogo único de unidades de medida.
+     */
+    public IMongoCollection<UnitOfMeasure>
+        UnitsOfMeasure =>
+            _database.GetCollection<UnitOfMeasure>(
+                "UnitsOfMeasure"
+            );
+
+    public IMongoCollection<RawMaterial>
+        RawMaterials =>
+            _database.GetCollection<RawMaterial>(
+                "RawMaterials"
+            );
 
     public IMongoCollection<RawMaterialMovement>
         RawMaterialMovements =>
-            _database.GetCollection<RawMaterialMovement>(
+            _database.GetCollection<
+                RawMaterialMovement
+            >(
                 "RawMaterialMovements"
             );
 
     public IMongoCollection<Purchase> Purchases =>
-        _database.GetCollection<Purchase>("Purchases");
+        _database.GetCollection<Purchase>(
+            "Purchases"
+        );
 
     public IMongoCollection<Recipe> Recipes =>
-        _database.GetCollection<Recipe>("Recipes");
+        _database.GetCollection<Recipe>(
+            "Recipes"
+        );
 
     public IMongoCollection<ProductionOrder>
         ProductionOrders =>
-            _database.GetCollection<ProductionOrder>(
+            _database.GetCollection<
+                ProductionOrder
+            >(
                 "ProductionOrders"
             );
 
     public IMongoCollection<Waste> Wastes =>
-        _database.GetCollection<Waste>("Wastes");
+        _database.GetCollection<Waste>(
+            "Wastes"
+        );
 
     public IMongoCollection<Order> Orders =>
-        _database.GetCollection<Order>("Orders");
+        _database.GetCollection<Order>(
+            "Orders"
+        );
 
     public IMongoCollection<Sale> Sales =>
-        _database.GetCollection<Sale>("Sales");
+        _database.GetCollection<Sale>(
+            "Sales"
+        );
 
     public IMongoCollection<AuditLog> AuditLogs =>
         _database.GetCollection<AuditLog>(
@@ -103,29 +150,43 @@ public class MongoDbService
             "SystemLogs"
         );
 
-    public IMongoCollection<Documentation> Documentation =>
-        _database.GetCollection<Documentation>(
-            "Documentation"
-        );
+    public IMongoCollection<Documentation>
+        Documentation =>
+            _database.GetCollection<
+                Documentation
+            >(
+                "Documentation"
+            );
 
-    public IMongoCollection<SupportTicket> SupportTickets =>
-        _database.GetCollection<SupportTicket>(
-            "SupportTickets"
-        );
+    public IMongoCollection<SupportTicket>
+        SupportTickets =>
+            _database.GetCollection<
+                SupportTicket
+            >(
+                "SupportTickets"
+            );
 
-    public IMongoCollection<UpdateNews> UpdateNews =>
-        _database.GetCollection<UpdateNews>(
-            "UpdateNews"
-        );
+    public IMongoCollection<UpdateNews>
+        UpdateNews =>
+            _database.GetCollection<UpdateNews>(
+                "UpdateNews"
+            );
 
-    public IMongoCollection<Notification> Notifications =>
-        _database.GetCollection<Notification>(
-            "Notifications"
-        );
+    public IMongoCollection<Notification>
+        Notifications =>
+            _database.GetCollection<
+                Notification
+            >(
+                "Notifications"
+            );
 
     public IMongoCollection<EtlLog> EtlLogs =>
-        _database.GetCollection<EtlLog>("EtlLogs");
+        _database.GetCollection<EtlLog>(
+            "EtlLogs"
+        );
 
     public IMongoCollection<Comment> Comments =>
-        _database.GetCollection<Comment>("Comments");
+        _database.GetCollection<Comment>(
+            "Comments"
+        );
 }
